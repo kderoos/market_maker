@@ -1,0 +1,9 @@
+[workspace]
+members = [
+    "common",
+    "engine",
+    "api",
+    "connectors-bitvavo",
+    "connectors-bitmex",
+]
+
