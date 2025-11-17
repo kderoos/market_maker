@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8" />
+  <title>Penetration Histogram</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <style>
+    body { font-family: sans-serif; padding: 20px; }
+    #connect { padding: 8px 16px; font-size: 16px; }
+    #chart-container { width: 100%; height: 500px; }
+  </style>
+</head>
+<body>
+  <button id="connect">Connect WebSocket</button>
+
+  <div id="chart-container">
+    <canvas id="histChart"></canvas>
+  </div>
+
+  <script>
+    let chart;
+
+    function createChart(data) {
+      const ctx = document.getElementById("histChart");
+
+      if (chart) chart.destroy();
+
+      chart = new Chart(ctx, {
+        type: "bar",
+        data: {
+          labels: data.map(d => d.level),
+          datasets: [{
+            label: "Penetration Count",
+            data: data.map(d => d.value)
+          }]
+        },
+        options: {
+          responsive: true,
+          animation: false,
+          scales: {
+            x: { display: false },
+            y: { beginAtZero: true }
+          }
+        }
+      });
+    }
+
+    document.getElementById("connect").onclick = () => {
+      const ws = new WebSocket("ws://127.0.0.1:3000/ws");
+
+      ws.onopen = () => {
+        ws.send(JSON.stringify({
+          exchange: "bitmex",
+          cmd: { Subscribe: { channel: "Book", symbol: "XBTUSDT" } }
+        }));
+        ws.send(JSON.stringify({
+          exchange: "bitmex",
+          cmd: { Subscribe: { channel: "Trade", symbol: "XBTUSDT" } }
+        }));
+      };
+
+      ws.onmessage = (msg) => {
+        try {
+          const parsed = JSON.parse(msg.data);
+          if (parsed.Penetration) {
+            const counts = parsed.Penetration.counts;
+            const chartData = counts.map((v, i) => ({ level: i, value: v }));
+            createChart(chartData);
+          }
+        } catch (e) {
+          console.error("Invalid JSON", e);
+        }
+      };
+    };
+  </script>
+</body>
+</html>
+

@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>BitMEX Depth Chart</title>
+  <script src="https://cdn.plot.ly/plotly-2.30.0.min.js"></script>
+  <style>
+    body {
+      font-family: sans-serif;
+      margin: 0;
+      background: #111;
+      color: #eee;
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+    }
+    #chart {
+      flex: 1;
+    }
+    #status {
+      background: #222;
+      padding: 8px 16px;
+      font-size: 14px;
+    }
+  </style>
+</head>
+<body>
+  <div id="status">Connecting to WebSocket...</div>
+  <div id="chart"></div>
+
+  <script>
+    const ws = new WebSocket("ws://127.0.0.1:3000/ws");
+    const status = document.getElementById("status");
+
+    ws.onopen = () => {
+      status.textContent = "Connected. Subscribing...";
+      ws.send(JSON.stringify({
+        exchange: "bitmex",
+        cmd: { Subscribe: { channel: "Book", symbol: "XBTUSDT" } }
+      }));
+    };
+
+    ws.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        if (!data.Depth) return;
+
+        const { bid, ask, timestamp } = data.Depth;
+
+        //// Sort bids descending by price, asks ascending
+        //const sortedBids = bid.sort((a, b) => b[0] - a[0]);
+        //const sortedAsks = ask.sort((a, b) => a[0] - b[0]);
+
+        //// Cumulative volume
+        //const bidPrices = sortedBids.map(b => b[0]);
+        //const bidVolumes = sortedBids.map((_, i) =>
+        //  sortedBids.slice(0, i + 1).reduce((sum, x) => sum + x[1], 0)
+        //);
+
+        //const askPrices = sortedAsks.map(a => a[0]);
+        //const askVolumes = sortedAsks.map((_, i) =>
+        //  sortedAsks.slice(0, i + 1).reduce((sum, x) => sum + x[1], 0)
+        //);
+	
+	const bidPrices = bid.map(a => a[0]);
+	const askPrices = ask.map(b => b[0]);
+
+	const bidVolumes = bid.map(a => a[1]);
+	const askVolumes = ask.map(b => b[1]);
+        const layout = {
+          title: "Order Book Depth (XBTUSDT)",
+          paper_bgcolor: "#111",
+          plot_bgcolor: "#111",
+          font: { color: "#eee" },
+          xaxis: { title: "Price", gridcolor: "#333" },
+          yaxis: { title: "Cumulative Volume", gridcolor: "#333" },
+          showlegend: true,
+          margin: { l: 50, r: 20, t: 40, b: 40 }
+        };
+
+        const bidTrace = {
+          x: bidPrices,
+          y: bidVolumes,
+          name: "Bids",
+          type: "scatter",
+          mode: "lines",
+          fill: "tozeroy",
+          line: { color: "#2ecc71" }
+        };
+
+        const askTrace = {
+          x: askPrices,
+          y: askVolumes,
+          name: "Asks",
+          type: "scatter",
+          mode: "lines",
+          fill: "tozeroy",
+          line: { color: "#e74c3c" }
+        };
+
+        Plotly.newPlot("chart", [bidTrace, askTrace], layout, { responsive: true });
+
+        /*status.textContent = `Last update: ${new Date(timestamp / 1e6).toISOString()}`;*/
+        status.textContent = `Last update: ${new Date(timestamp/1e3 ).toISOString()}`;
+      } catch (err) {
+        console.error("Error parsing WS message:", err);
+      }
+    };
+
+    ws.onclose = () => status.textContent = "Disconnected.";
+    ws.onerror = (e) => status.textContent = "WebSocket error.";
+  </script>
+</body>
+</html>
+

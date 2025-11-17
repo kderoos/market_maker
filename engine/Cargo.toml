@@ -1,0 +1,12 @@
+[package]
+name = "engine"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+connectors-bitmex = { path = "../connectors-bitmex" }
+connectors-bitvavo = { path = "../connectors-bitvavo" }
+common = { version = "0.1.0", path = "../common" }
+tokio = { version = "1", features = ["full"] }
+async-trait = "0.1.89"
+console-subscriber = "0.4.1"
