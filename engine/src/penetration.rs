@@ -49,7 +49,7 @@ pub async fn midprice_sampler(
                     mid_price: mid,
                 };
                 // let _ = tx.send(AnyUpdate(mp));
-                // panic!("MidPrice sampler not yet implemented");
+                panic!("MidPrice sampler not yet implemented");
                 // println!("MidPrice sampler: {:?}", mp);
             }
         }
@@ -151,9 +151,7 @@ impl TradePricedeltaHist {
         let copy_self = self.clone();
         self.midprice_tick = new_midprice_tick; 
         self.timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64;
-        // println!("new midprice tick set at {} to {}", self.timestamp,new_midprice_tick);
         self.bins.reset();
-        // for b in &mut self.bins { *b = 0; }
         copy_self
     }
 
@@ -195,52 +193,18 @@ impl PenetrationAggregator {
         }
     }
 }
-// pub struct PenetrationTracker{
-//     // current accumulator (protected by Mutex for simplicity)
-//     pub current: Mutex<PenetrationBuckets>,
-//     // optional history: last N snapshots
-//     pub history: Mutex<VecDeque<PenetrationBuckets>>,
-//     pub history_size: usize,
-// }
 
-// impl PenetrationTracker {
-//     pub fn new(history_size: usize) -> Self {
-//         Self {
-//             current: Mutex::new(PenetrationBuckets::default()),
-//             history: Mutex::new(VecDeque::with_capacity(history_size)),
-//             history_size,
-//         }
-//     }
-
-//     pub fn record_ticks(&self, ticks: i64) {
-//         let mut cur = self.current.lock().unwrap();
-//         cur.record(ticks);
-//     }
-
-//     pub fn snapshot_and_rotate(&self) -> PenetrationBuckets {
-//         let mut cur = self.current.lock().unwrap();
-//         let snap = cur.clone();
-//         cur.reset();
-//         let mut hist = self.history.lock().unwrap();
-//         hist.push_back(snap.clone());
-//         if hist.len() > self.history_size { hist.pop_front(); }
-//         snap
-//     }
-// }
-
-// // need Clone for snapshot push
-// impl Clone for PenetrationBuckets {
-//     fn clone(&self) -> Self { PenetrationBuckets { bins: self.bins } }
-// }
 pub async fn engine(
     mut rx: Receiver<AnyUpdate>, 
     tx_ws: Sender<AnyWsUpdate>,
     // mut aggregator: PenetrationAggregator,
     book_state: Arc<RwLock<OrderBook>>, 
+    window_len: usize,
+    num_bins: usize,
     interval_ms: u64,
     symbol: String,
 ) {
-    let mut aggregator = PenetrationAggregator::new(60, 500); // window size 100, 50 bins
+    let mut aggregator = PenetrationAggregator::new(window_len, num_bins); // window size 100, 50 bins
     let interval = tokio::time::Duration::from_millis(interval_ms);
     let mut ticker = tokio::time::interval(interval);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -249,29 +213,10 @@ pub async fn engine(
         tokio::select!{
             // Process trade updates
             Ok(update) = rx.recv() => {
-                // println!("Penetration engine received update: {:?}", update);
                 match update {
                     AnyUpdate::TradeUpdate(trade) => {
-                        // if symbol == trade.quote + &trade.base { // remove ?
-                        {
-                            let mid_price_tick = aggregator.current.midprice_tick;
-                            // println!("Penetration engine received trade update: {:?} mid-price:{}", trade,mid_price_tick);
-                            // let price_delta = match trade.side.as_str() {
-                            //     "Buy" => {
-                            //         (trade.price/trade.tick_size) as u64 - mid_price_tick
-                            //     } 
-                            //     "Sell" => {
-                            //         mid_price_tick - (trade.price/trade.tick_size) as u64
-                            //     }
-                            //     _ => {
-                            //         eprintln!("Unknown trade side in penetration engine: {}", trade.side);
-                            //         continue;
-                            //     }
-                            // };
-                            // let price_delta = mid_price_tick.abs_diff((trade.price/trade.tick_size) as u64);
-                            // aggregator.current.record(price_delta as u32);
-                            aggregator.current.record_trade(trade).await;
-                        }   
+                        let mid_price_tick = aggregator.current.midprice_tick;
+                        aggregator.current.record_trade(trade).await;
                     }
                     //Ignore other updates
                     _ => { 
@@ -285,10 +230,9 @@ pub async fn engine(
                         let state = book_state.read().unwrap();
                         state.get_midprice_tick()
                     };
-                    // Hadle empty orderbook
+                    // Handle empty orderbook
                     match mid_price_tick {
                         Some(new_midprice_tick) => { 
-                            // println!("Penetration engine: New midprice tick: {}", new_midprice_tick);
                             let last = aggregator.current.collect_and_reset(new_midprice_tick);
                             let depth_snapshot = PenetrationUpdate {
                                 timestamp: last.timestamp.clone(),
@@ -296,22 +240,12 @@ pub async fn engine(
                                 counts: aggregator.aggregated_counts.clone().as_vec(), // Keep Counts implementation local.
                             };
 
-                            // println!("Penetration engine: {} trades received", aggregator.current.bins.0.first().unwrap());
-                            // println!("Penetration engine: snapshot {:?}", depth_snapshot);
-                            // println!("Aggregator before: {:?}", aggregator);
-                            // println!("Collected {} of {} snapshots", aggregator.count, aggregator.window_len);
                             _ = aggregator.rotate(last);
-                            // println!("Aggregator after: {:?}", aggregator);
 
-                            let sh = depth_snapshot.counts.clone();
-                            let top = sh.iter().take(10).cloned().collect::<Vec<u64>>();
-                            // println!("Penetration engine: Sent penetration update with top 10 bins: {:?}", top);
-                            
                             let ws_update = AnyWsUpdate::Penetration(depth_snapshot);
                             let _ = tx_ws.send(ws_update);
                         }
                         None => {
-                            // eprintln!("Penetration engine: Unable to get midprice for symbol {}", symbol);
                             continue;
                         }
                     };
@@ -319,6 +253,30 @@ pub async fn engine(
             }
 
 
+        }
+    }
+}
+impl SimpleSLR {
+    fn from_penetration_hist(&mut self, count_hist:&Vec<u64>){
+        let n = count_hist.len();
+        self.new(n);
+        let mut y_data = Vec::with_capacity(n);
+        let mut x_data = Vec::with_capacity(n*2); //2 columns: intercept and x values
+        for (i, count) in count_hist.iter().enumerate(){
+            let x = i as f64;
+            let c = *count as f64;
+            if c > 0.0 {
+                y_data.push(c.ln());
+                x_data.push(1.0); //intercept
+                x_data.push(x);
+            }
+        }
+        let Y = DVector::from_vec(y_data);
+        let X = DMatrix::from_row_slice(Y.len(), 2, &x_data);
+        Self{
+            Y,
+            X,
+            beta: None,
         }
     }
 }
