@@ -236,13 +236,15 @@ pub async fn engine(
                     match mid_price_tick {
                         Some(new_midprice_tick) => { 
                             let last = aggregator.current.collect_and_reset(new_midprice_tick);
+                            
+                            _ = aggregator.rotate(last);
+                            
                             let depth_snapshot = PenetrationUpdate {
                                 timestamp: last.timestamp.clone(),
                                 symbol: symbol.clone(),
                                 counts: aggregator.aggregated_counts.clone().as_vec(), // Keep Counts implementation local.
                             };
 
-                            _ = aggregator.rotate(last);
 
                             let ws_update = AnyWsUpdate::Penetration(depth_snapshot);
                             let _ = tx_ws.send(ws_update);
@@ -282,6 +284,17 @@ impl From<&Counts> for SimpleSLR {
         }
     }
 }
+impl SimpleSLR {
+    pub fn to_exp_params(&self) -> Result<(f64,f64), String> {
+        if let Some(beta) = &self.beta {
+            let A = beta[0].exp();
+            let k = -beta[1];
+            Ok((A,k))
+        } else {
+            Err("SimpleSLR: Model not fitted yet".to_string())
+        }
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -308,9 +321,9 @@ mod tests {
         let (A,k) = (1000.0, 0.5);
         let counts = Counts((0..5).map(|x| ((A * (-k * x as f64).exp()).round() as u64 )).collect());
         let mut slr = SimpleSLR::from(&counts);
-        let beta = slr.fit();
-        let A_est = beta[0].exp();
-        let k_est = -beta[1];
+        slr.fit();
+        let (A_est, k_est) = slr.to_exp_params().unwrap();
+
         println!("True A: {}, k: {}", A, k);
         println!("Estimated A: {}, k: {}", A_est, k_est);
         assert!((A - A_est).abs() / A < 0.1);
