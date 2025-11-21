@@ -38,6 +38,8 @@ pub struct PenetrationUpdate{
     pub timestamp: u64,
     pub symbol: String,
     pub counts: Vec<u64>,
+    pub fit_A: Option<f64>,
+    pub fit_k: Option<f64>,
 }
 #[derive(Clone, Serialize)]
 pub enum AnyWsUpdate {

@@ -165,6 +165,8 @@ pub struct PenetrationAggregator{
     pub count: usize,
     pub data_window: VecDeque<TradePricedeltaHist>,
     pub aggregated_counts: Counts,
+    pub A: Option<f64>,
+    pub k: Option<f64>,
 }
 impl PenetrationAggregator {
     pub fn new(window_len: usize, number_bins: usize) -> Self {
@@ -174,9 +176,11 @@ impl PenetrationAggregator {
             count: 0,
             data_window: VecDeque::with_capacity(window_len+1),
             aggregated_counts: Counts::new(number_bins),
+            A: None,
+            k: None,
         }
     }
-    pub fn rotate(&mut self, new: TradePricedeltaHist ) -> Option<TradePricedeltaHist>{
+    pub fn rotate_aggregate(&mut self, new: TradePricedeltaHist ) -> Option<TradePricedeltaHist>{
         let new_hist_copy = new.clone();
         self.data_window.push_front(new);
         self.aggregated_counts.add(&new_hist_copy.bins);
@@ -193,7 +197,17 @@ impl PenetrationAggregator {
         } else {
             None
         }
+        
     }
+    pub fn fit_exponential(&mut self) -> Result<(f64,f64), String> {
+        let mut slr = SimpleSLR::from(&self.aggregated_counts);
+        slr.fit();
+        let (A,k) = slr.to_exp_params()?;
+        self.A = Some(A);
+        self.k = Some(k);
+        Ok((A,k))
+    }
+
 }
 
 pub async fn engine(
@@ -237,12 +251,14 @@ pub async fn engine(
                         Some(new_midprice_tick) => { 
                             let last = aggregator.current.collect_and_reset(new_midprice_tick);
                             
-                            _ = aggregator.rotate(last);
-                            
+                            _ = aggregator.rotate_aggregate(last.clone());
+                            let Ok((A,k)) = aggregator.fit_exponential() else {todo!()};
                             let depth_snapshot = PenetrationUpdate {
                                 timestamp: last.timestamp.clone(),
                                 symbol: symbol.clone(),
                                 counts: aggregator.aggregated_counts.clone().as_vec(), // Keep Counts implementation local.
+                                fit_A: Some(A),
+                                fit_k: Some(k),
                             };
 
 
@@ -291,7 +307,7 @@ impl SimpleSLR {
             let k = -beta[1];
             Ok((A,k))
         } else {
-            Err("SimpleSLR: Model not fitted yet".to_string())
+            Err("SimpleSLR: Fit model first".to_string())
         }
     }
 }
