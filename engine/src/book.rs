@@ -118,7 +118,7 @@ pub async fn pub_book_depth(tx_ws: broadcast::Sender<common::AnyWsUpdate>, book_
                 ask: top_cum_asks,
                 timestamp: state.timestamp,
             };
-            if snapshot.timestamp < 0 {
+            if snapshot.timestamp > 0 {
                 let depth_update = common::AnyWsUpdate::Depth(snapshot);
                 let _ = tx_ws.send(depth_update);
             }
@@ -228,6 +228,7 @@ mod tests {
             exchange: "test_ex".to_string(),
             symbol: "TEST".to_string(),
             action: "insert".to_string(),
+            tick_size: 0.01,
             data: vec![
                 mock_book_entry("Buy", 100.0, 10),
                 mock_book_entry("Sell", 101.0, 15),
@@ -252,6 +253,7 @@ mod tests {
             exchange: "test_ex".to_string(),
             symbol: "TEST".to_string(),
             action: "delete".to_string(),
+            tick_size: 0.01,
             data: vec![
                 mock_book_entry("Buy", 100.0, 0), // size is irrelevant for delete
             ],

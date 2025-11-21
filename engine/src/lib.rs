@@ -1,5 +1,7 @@
 mod book;
 mod penetration;
+mod regression;
+
 use book::{book_engine, print_book,pub_book_depth, OrderBook};
 
 use std::collections::HashMap;
@@ -32,18 +34,20 @@ impl Engine {
         tokio::spawn(book_engine(rx_exchange, book_state_clone));
         // tokio::spawn(print_book(book_state.clone()));
         tokio::spawn(pub_book_depth(tx_ws.clone(), book_state.clone()));
-        tokio::spawn(penetration::midprice_sampler(
-            tx_exchange.clone(), // Mid-price sampler sends to engine instead of ws.
-            book_state.clone(),
-            1000,
-            "XBTUSDT".to_string(),
-        ));
+        // tokio::spawn(penetration::midprice_sampler(
+        //     tx_exchange.clone(), // Mid-price sampler sends to engine instead of ws.
+        //     book_state.clone(),
+        //     1000,
+        //     "XBTUSDT".to_string(),
+        // ));
         let rx_penetration = tx_exchange.subscribe(); 
         tokio::spawn(penetration::engine(
             rx_penetration,
             tx_ws.clone(),
             book_state.clone(),
-            1000,
+            120, //window_len
+            500, //num_bins
+            500, //interval_ms
             "XBTUSDT".to_string(),
         ));
 

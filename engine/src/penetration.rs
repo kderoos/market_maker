@@ -3,6 +3,8 @@ use std::sync::{Arc, RwLock};
 use tokio::sync::broadcast::{Sender, Receiver};
 use std::time::{SystemTime, UNIX_EPOCH};
 use crate::book::OrderBook;
+use nalgebra::{DMatrix, DVector};
+use crate::regression::{SimpleSLR, RegressionEngine};
 use common::{AnyUpdate,TradeUpdate, PenetrationUpdate, AnyWsUpdate};
 
 #[derive(Clone, Debug)]
@@ -256,27 +258,62 @@ pub async fn engine(
         }
     }
 }
-impl SimpleSLR {
-    fn from_penetration_hist(&mut self, count_hist:&Vec<u64>){
-        let n = count_hist.len();
-        self.new(n);
+impl From<&Counts> for SimpleSLR {
+    //y = X*beta
+    fn from(counts: &Counts)-> Self{
+        let n = counts.len();
         let mut y_data = Vec::with_capacity(n);
         let mut x_data = Vec::with_capacity(n*2); //2 columns: intercept and x values
-        for (i, count) in count_hist.iter().enumerate(){
+        for (i, &count) in counts.0.iter().enumerate(){
             let x = i as f64;
-            let c = *count as f64;
-            if c > 0.0 {
-                y_data.push(c.ln());
-                x_data.push(1.0); //intercept
-                x_data.push(x);
-            }
+            let c = (count as f64 + 1.0).ln(); //linearize like c -> ln(1+c)  so c can be 0. 
+
+            y_data.push(c.ln());
+            x_data.push(1.0); //intercept
+            x_data.push(x);
         }
-        let Y = DVector::from_vec(y_data);
-        let X = DMatrix::from_row_slice(Y.len(), 2, &x_data);
-        Self{
-            Y,
-            X,
+        let y = DVector::from_vec(y_data);
+        let x = DMatrix::from_row_slice(y.len(), 2, &x_data);
+        
+        SimpleSLR{
+            Y:y,
+            X:x,
             beta: None,
         }
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn test_counts_add_sub() {
+        let mut c1 = Counts::new(5);
+        let mut c2 = Counts::new(5);
+        c1.0 = vec![1, 2, 3, 4, 5];
+        c2.0 = vec![5, 4, 3, 2, 1];
+        c1.add(&c2);
+        assert_eq!(c1.0, vec![6, 6, 6, 6, 6]);
+        c1.sub(&c2);
+        assert_eq!(c1.0, vec![1, 2, 3, 4, 5]);
+    }
+
+    fn test_lsr_fit() {
+        let counts = Counts(vec![100, 50, 25, 12, 6]);
+        let mut slr = SimpleSLR::from(&counts);
+        let beta = slr.fit();
+        println!("Fitted beta: {:?}", beta);
+        assert!(beta.len() == 2);
+    }
+    fn test_slr_ak_fit() {
+        let (A,k) = (1000.0, 0.5);
+        let counts = Counts((0..5).map(|x| ((A * (-k * x as f64).exp()).round() as u64 )).collect());
+        let mut slr = SimpleSLR::from(&counts);
+        let beta = slr.fit();
+        let A_est = beta[0].exp();
+        let k_est = -beta[1];
+        println!("True A: {}, k: {}", A, k);
+        println!("Estimated A: {}, k: {}", A_est, k_est);
+        assert!((A - A_est).abs() / A < 0.1);
+        assert!((k - k_est).abs() / k < 0.1);
     }
 }
