@@ -253,6 +253,7 @@ pub async fn engine(
                             
                             _ = aggregator.rotate_aggregate(last.clone());
                             let Ok((A,k)) = aggregator.fit_exponential() else {todo!()};
+                            println!("Penetration fit results: A = {}, k = {}", A, k);
                             let depth_snapshot = PenetrationUpdate {
                                 timestamp: last.timestamp.clone(),
                                 symbol: symbol.clone(),
@@ -283,12 +284,15 @@ impl From<&Counts> for SimpleSLR {
         let mut y_data = Vec::with_capacity(n);
         let mut x_data = Vec::with_capacity(n*2); //2 columns: intercept and x values
         for (i, &count) in counts.0.iter().enumerate(){
-            let x = i as f64;
-            let c = (count as f64 + 1.0).ln(); //linearize like c -> ln(1+c)  so c can be 0. 
+            if count > 0 { //skip zero counts to avoid ln(0)
+                let x = i as f64;
+                let c = (count as f64).ln(); //linearize like c -> ln(c) 
 
-            y_data.push(c.ln());
-            x_data.push(1.0); //intercept
-            x_data.push(x);
+                y_data.push(c);
+                x_data.push(1.0); //intercept
+                x_data.push(x);
+            }
+
         }
         let y = DVector::from_vec(y_data);
         let x = DMatrix::from_row_slice(y.len(), 2, &x_data);
@@ -325,15 +329,18 @@ mod tests {
         c1.sub(&c2);
         assert_eq!(c1.0, vec![1, 2, 3, 4, 5]);
     }
-
-    fn test_lsr_fit() {
+    #[test]
+    fn test_lsr_beta() {
         let counts = Counts(vec![100, 50, 25, 12, 6]);
         let mut slr = SimpleSLR::from(&counts);
         let beta = slr.fit();
         println!("Fitted beta: {:?}", beta);
         assert!(beta.len() == 2);
+        assert!(!beta[0].is_nan());
+        assert!(!beta[1].is_nan());
     }
-    fn test_slr_ak_fit() {
+    #[test]
+    fn test_slr_exp() {
         let (A,k) = (1000.0, 0.5);
         let counts = Counts((0..5).map(|x| ((A * (-k * x as f64).exp()).round() as u64 )).collect());
         let mut slr = SimpleSLR::from(&counts);

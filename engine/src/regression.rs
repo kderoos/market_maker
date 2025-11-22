@@ -12,7 +12,7 @@ pub trait RegressionEngine: Send + Sync {
 }
 pub struct SimpleSLR{
     //We fit the linear model y = X * beta + err (or yi = beta0 + beta1*xi + err_i)
-    pub  Y: DVector<f64>,
+    pub Y: DVector<f64>,
     pub X: DMatrix<f64>,
     pub beta: Option<DVector<f64>>,
 }
@@ -29,5 +29,29 @@ impl RegressionEngine for SimpleSLR {
         let beta = xtx_inv.mul(&xty);
         self.beta = Some(beta.clone());
         beta    
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn test_lsr_linear() {
+        // y = 3x + 5, for x = 0 .. 10
+        let x_data = (0..=10).map(|x| x as f64).collect::<Vec<f64>>();
+        let n = x_data.len();
+
+        let mut x_mat = DMatrix::from_element(n,2,1.0); // 2xn matrix with 1.0
+        let y_mat = DVector::from_fn(n,|i,_| (3*i+5) as f64);
+        for (i,v) in x_data.iter().enumerate() {
+            let f = i as f64;
+            x_mat[(i,1)] = f;
+        }
+        print!("X:{} Y:{}",x_mat.to_string(),y_mat.to_string());
+        
+        let mut slr = SimpleSLR{ X: x_mat, Y: y_mat, beta: None };
+        let beta = slr.fit();
+        println!("Fitted beta: {:?}", beta);
+        assert_eq!(beta[0],5.0);
+        assert_eq!(beta[1],3.0);
     }
 }
