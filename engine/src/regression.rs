@@ -8,7 +8,7 @@ use na::{DMatrix, DVector};
 // Writing y = log(C(x)), we have y = beta0 + beta1*x + err, where beta0 = log(A), beta1 = -k.
 
 pub trait RegressionEngine: Send + Sync {
-    fn fit(&mut self) -> DVector<f64>;// (log(A), -k)
+    fn fit(&mut self) -> Result<DVector<f64>, String>;// (log(A), -k)
 }
 pub struct SimpleSLR{
     //We fit the linear model y = X * beta + err (or yi = beta0 + beta1*xi + err_i)
@@ -20,15 +20,17 @@ impl RegressionEngine for SimpleSLR {
     // fn from_xy(X: DMatrix<f64>, Y: DVector<f64>) -> Self {
     //     Self {X, Y, beta: None }
     // }
-    fn fit(&mut self) -> DVector<f64> {
+    fn fit(&mut self) -> Result<DVector<f64>, String> {
         // beta = (X'X)^-1 X'Y
         let xt = self.X.transpose();
         let xtx = &xt * &self.X;
-        let xtx_inv = xtx.try_inverse().expect("RegressionEngine: Unable to invert X'X matrix");
+        let Some(xtx_inv) = xtx.try_inverse() else {
+            return Err("X'X matrix is singular, cannot invert".to_string());
+        };
         let xty = xt *&self.Y;
         let beta = xtx_inv.mul(&xty);
         self.beta = Some(beta.clone());
-        beta    
+        Ok(beta)
     }
 }
 #[cfg(test)]
@@ -46,12 +48,21 @@ mod tests {
             let f = i as f64;
             x_mat[(i,1)] = f;
         }
-        print!("X:{} Y:{}",x_mat.to_string(),y_mat.to_string());
         
+        print!("X:{} Y:{}",x_mat.to_string(),y_mat.to_string());
+
         let mut slr = SimpleSLR{ X: x_mat, Y: y_mat, beta: None };
-        let beta = slr.fit();
-        println!("Fitted beta: {:?}", beta);
-        assert_eq!(beta[0],5.0);
-        assert_eq!(beta[1],3.0);
+        match slr.fit() {
+            Ok(beta) => {
+                println!("Fitted beta: {:?}", beta);
+                assert_eq!(beta[0],5.0);
+                assert_eq!(beta[1],3.0);
+            }
+            Err(e) => {
+                println!("SLR fit failed: {}", e);
+                assert!(false);
+            }
+        }
+
     }
 }

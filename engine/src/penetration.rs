@@ -201,7 +201,7 @@ impl PenetrationAggregator {
     }
     pub fn fit_exponential(&mut self) -> Result<(f64,f64), String> {
         let mut slr = SimpleSLR::from(&self.aggregated_counts);
-        slr.fit();
+        slr.fit()?;
         let (A,k) = slr.to_exp_params()?;
         self.A = Some(A);
         self.k = Some(k);
@@ -252,8 +252,18 @@ pub async fn engine(
                             let last = aggregator.current.collect_and_reset(new_midprice_tick);
                             
                             _ = aggregator.rotate_aggregate(last.clone());
-                            let Ok((A,k)) = aggregator.fit_exponential() else {todo!()};
-                            println!("Penetration fit results: A = {}, k = {}", A, k);
+                            let (A,k) = match aggregator.fit_exponential(){
+                                Err(e) => {
+                                    eprintln!("Penetration depth regression fit error: {}", e);
+                                    eprintln!("Aggregated counts: {:?}", aggregator.aggregated_counts.clone().as_vec());
+                                    continue;
+                                }
+                                Ok((A,k)) => { 
+                                    println!("Penetration fit results: A = {}, k = {}", A, k);
+                                    (A,k)
+                                }
+                            };
+
                             let depth_snapshot = PenetrationUpdate {
                                 timestamp: last.timestamp.clone(),
                                 symbol: symbol.clone(),
@@ -333,18 +343,33 @@ mod tests {
     fn test_lsr_beta() {
         let counts = Counts(vec![100, 50, 25, 12, 6]);
         let mut slr = SimpleSLR::from(&counts);
-        let beta = slr.fit();
-        println!("Fitted beta: {:?}", beta);
-        assert!(beta.len() == 2);
-        assert!(!beta[0].is_nan());
-        assert!(!beta[1].is_nan());
+        match slr.fit() {
+            Ok(beta) => {
+                println!("Fitted beta: {:?}", beta);
+                assert!(beta.len() == 2);
+                assert!(!beta[0].is_nan());
+                assert!(!beta[1].is_nan());
+            }
+            Err(e) => {
+                println!("SLR fit failed: {}", e);
+                assert!(false);
+            }
+        }
     }
     #[test]
     fn test_slr_exp() {
         let (A,k) = (1000.0, 0.5);
         let counts = Counts((0..5).map(|x| ((A * (-k * x as f64).exp()).round() as u64 )).collect());
         let mut slr = SimpleSLR::from(&counts);
-        slr.fit();
+        match slr.fit() {
+            Ok(beta) => {
+                println!("Fitted beta: {:?}", beta);
+            }
+            Err(e) => {
+                println!("SLR fit failed: {}", e);
+                assert!(false);
+            }
+        }
         let (A_est, k_est) = slr.to_exp_params().unwrap();
 
         println!("True A: {}, k: {}", A, k);
