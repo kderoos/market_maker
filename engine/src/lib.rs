@@ -51,21 +51,6 @@ impl Engine {
             "XBTUSDT".to_string(),
         ));
 
-        // //test receiving on tx_exchange
-        // let mut rx_test = tx_exchange.subscribe();
-        // tokio::spawn(async move {
-        //     loop {
-        //         match rx_test.recv().await {
-        //             ok(update) => { 
-        //                 println!("test received update: {:?}", update);
-        //             }
-        //             err(e) => {
-        //                 eprintln!("test receiver error: {}", e);
-        //                 break;
-        //             }
-        //         }
-        //     }
-        // });
         // Spawn connectors
         let mut bitmex = BitmexConnector::default();
         let tx_bitmex_updates = tx_exchange.clone();
@@ -73,13 +58,6 @@ impl Engine {
         tokio::spawn(async move {
             bitmex.run(tx_bitmex_updates, rx_bitmex_cmd).await;
         });
-
-        // let mut bitvavo = BitvavoConnector;
-        // let tx_bitvavo_updates = tx_exchange.clone();
-        // let rx_bitvavo_cmd = tx_cmd.subscribe();
-        // tokio::spawn(async move {
-        //     bitvavo.run(tx_bitvavo_updates, rx_bitvavo_cmd).await;
-        // });
 
         Engine {
             tx_cmd,
@@ -92,14 +70,3 @@ impl Engine {
         let _ = self.tx_cmd.send(cmd);
     }
 }
-
-// #[tokio::main]
-// async fn main() {
-//     let engine = Engine::init();
-
-//     // Subscribe to channels
-//     engine.send_cmd(ConnectorCommand::Subscribe { channel: ChannelType::Book, symbol: "XBTUSDT".to_string() });
-//     engine.send_cmd(ConnectorCommand::Subscribe { channel: ChannelType::Trade, symbol: "XBTUSDT".to_string() });
-
-//     tokio::signal::ctrl_c().await.unwrap();
-// }
