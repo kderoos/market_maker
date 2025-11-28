@@ -109,7 +109,23 @@ impl ExecutionState {
                     }
                 }
             }
-            "Sell" => {}
+            "Sell" => {
+                if let Some(orders) = self.bid_orders.get_mut(&key) {
+                    let qty_level = orderbook.read().await.bids.entries.get(&key).map_or(0, |lvl| lvl.size);
+                    for order in orders.iter_mut() {
+                        // Scale probabilty of fill by relative position in queue
+                        let p = 1.0 - (order.size_ahead / qty_level);
+                        let r: f64 = rand::random();
+                        // random trial
+                        if r < p {
+                            return self.process_fill(order, &trade).await;
+                        } else {
+                            // Update position in queue
+                            order.size_ahead = order.size_ahead.saturating_sub(trade.size as u64);
+                        }
+                    }
+                }
+            }
         }
     }
     async fn process_fill(&mut self, order: &mut RestingOrder, trade: &TradeUpdate) -> Option<ExecutionEvent> {
@@ -156,5 +172,47 @@ pub async fn run(orderbook: Arc<RwLock<OrderBook>>,
                 }
             }
         }
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[tokio::test]
+    async fn test_execution_engine() {
+       let orderbook = Arc::new(RwLock::new(OrderBook::default()));
+       let (trade_tx, trade_rx) = tokio::sync::broadcast::channel(100);
+       let (order_tx, order_rx) = tokio::sync::broadcast::channel(100);
+       let (exec_tx, mut exec_rx) = tokio::sync::broadcast::channel(100);
+         tokio::spawn(run(orderbook.clone(), trade_rx, order_rx, exec_tx));
+         // create vol in order book
+         {
+             let mut ob = orderbook.write().await;
+             ob.asks.entries.insert(50000, book::OrderBookLevel { price: 50000.0, size: 10 });
+             ob.bids.entries.insert(49900, book::OrderBookLevel { price: 49900.0, size: 1000 });
+         }
+         // Place limit buy order
+         order_tx.send(Order::Limit{ symbol: "XBTUSDT".to_string(), side: "Buy".to_string(), price: 50000.0, size: 100 }).unwrap();
+         // Simulate trade that should fill the order
+         trade_tx.send(TradeUpdate {
+             symbol: "XBTUSDT".to_string(),
+             side: "Sell".to_string(),
+             price: 50000.0,
+             size: 100,
+             ts_exchange: Some(chrono::Utc::now().timestamp_micros()),
+             ts_received: chrono::Utc::now().timestamp_micros(),
+         }).unwrap();
+         
+         trade_tx.send(TradeUpdate {
+             symbol: "XBTUSDT".to_string(),
+             side: "Sell".to_string(),
+             price: 50000.0,
+             size: 100,
+             ts_exchange: Some(chrono::Utc::now().timestamp_micros()),
+             ts_received: chrono::Utc::now().timestamp_micros(),
+         }).unwrap();
+            // Check for execution event
+            let fill = exec_rx.recv().await.unwrap();
+            assert_eq!(fill.size, 100);
+            assert_eq!(fill.price, 50000.0);
     }
 }
