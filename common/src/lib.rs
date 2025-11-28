@@ -20,6 +20,12 @@ pub struct ExchangeConnectorCommand {
     pub cmd: ConnectorCommand,
 }
 
+pub enum Order {
+    Market{ symbol: String, side: String, size: f64 },
+    Limit{ symbol: String, side: String, price: f64, size: f64 },
+    Cancel{ order_id: String },
+}
+
 #[derive(Debug, Clone)]
 pub enum AnyUpdate {
     QuoteUpdate(QuoteUpdate),
