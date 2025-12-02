@@ -10,18 +10,7 @@ pub enum ChannelType {
     Book,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TradeUpdate {
-    pub exchange: String,
-    pub tick_size: f64,
-    pub base: String,
-    pub quote: String,
-    pub side: String,
-    pub price: f64,
-    pub size: f64,
-    pub ts_exchange: Option<i64>,
-    pub ts_received: i64,
-}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BookUpdate {
     pub exchange: String,

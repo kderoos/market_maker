@@ -41,6 +41,15 @@ impl OrderBook {
         }
     } 
 }
+impl Default for OrderBook {
+    fn default() -> Self {
+        OrderBook {
+            timestamp: 0,
+            bids: OrderBookSide { entries: HashMap::new() },
+            asks: OrderBookSide { entries: HashMap::new() },
+        }
+    }
+}
 pub async fn update_book_state(book_update: BookUpdate, book_state: Arc<RwLock<OrderBook>>) {
         // println!("Book update received: action: {}, entries: {}", book_update.action, book_update.data.len());
         // Process BookUpdate messages

@@ -24,12 +24,13 @@ impl Engine {
         let (tx_cmd, _) = broadcast::channel(100);
         let (tx_ws, _) = broadcast::channel(1000);
 
-        let book_state = Arc::new(RwLock::new(OrderBook {
-            timestamp: 0,
-            bids: book::OrderBookSide { entries: HashMap::new() },
-            asks: book::OrderBookSide { entries: HashMap::new() },
-        }));
-
+        // let book_state = Arc::new(RwLock::new(OrderBook {
+        //     timestamp: 0,
+        //     bids: book::OrderBookSide { entries: HashMap::new() },
+        //     asks: book::OrderBookSide { entries: HashMap::new() },
+        // }));
+        let book_state = Arc::new(RwLock::new(OrderBook::default()));
+        
         // Spawn engine tasks
         let book_state_clone = book_state.clone();
         tokio::spawn(book_engine(rx_exchange, book_state_clone));

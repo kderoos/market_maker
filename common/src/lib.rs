@@ -1,5 +1,5 @@
 pub mod types;
-pub use types::{ChannelType, TradeUpdate, QuoteUpdate, BookUpdate, BookEntry};
+pub use types::{ChannelType, QuoteUpdate, BookUpdate, BookEntry};
 
 use serde::{Serialize, Deserialize};
 use async_trait::async_trait;
@@ -19,13 +19,56 @@ pub struct ExchangeConnectorCommand {
     pub exchange: String,
     pub cmd: ConnectorCommand,
 }
-
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Order {
-    Market{ symbol: String, side: String, size: f64 },
-    Limit{ symbol: String, side: String, price: f64, size: f64 },
+    Market{ symbol: String, side: OrderSide, size: i64 },
+    Limit{ symbol: String, side: OrderSide, price: f64, size: i64 },
     Cancel{ order_id: String },
 }
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExecutionEvent {
+    pub order_id: i64,
+    pub side: OrderSide,
+    pub price: f64,
+    pub size: i64,
+    pub ts_exchange: Option<i64>,
+    pub ts_received: i64,
+}
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TradeUpdate {
+    pub exchange: String,
+    pub tick_size: f64,
+    pub base: String,
+    pub quote: String,
+    pub side: OrderSide,
+    pub price: f64,
+    pub size: i64,
+    pub ts_exchange: Option<i64>,
+    pub ts_received: i64,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase")] // serializes as "Buy"/"Sell"
+pub enum OrderSide {
+    Buy,
+    Sell,
+}
+impl std::fmt::Display for OrderSide {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self { OrderSide::Buy => write!(f, "Buy"), OrderSide::Sell => write!(f, "Sell") }
+    }
+}
+
+impl std::str::FromStr for OrderSide {
+    type Err = ();
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "Buy" | "buy" => Ok(OrderSide::Buy),
+            "Sell" | "sell" => Ok(OrderSide::Sell),
+            _ => Err(()),
+        }
+    }
+}
 #[derive(Debug, Clone)]
 pub enum AnyUpdate {
     QuoteUpdate(QuoteUpdate),
