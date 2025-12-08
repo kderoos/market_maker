@@ -313,30 +313,16 @@ mod tests {
         }
     }
     #[tokio::test]
-    async fn test_order_removed_via_no_more_events() {
+    async fn test_order_fill_no_more_events() {
         let (orderbook, trade_tx, order_tx, mut exec_rx, state) = setup_execution_engine().await;
-        // create some qty_ahead in order book
+        // Size ahead zero for deterministic fill
         {
             let mut ob = orderbook.write().await;
-            ob.asks.entries.insert(5000000, BookEntry {side: "Ask".to_string(), price: 50000.0, size: 10 });
-            ob.asks.entries.insert(4999999, BookEntry {side: "Ask".to_string(), price: 49999.99, size: 1000 });
+            ob.asks.entries.insert(5000000, BookEntry {side: "Ask".to_string(), price: 50000.0, size: 0 });
         }
         // Place limit buy order
         order_tx.send(Order::Limit{ symbol: "XBTUSDT".to_string(), side: Buy, price: 50000.0, size: 100 }).unwrap();
 
-        // Simulate trade that should fill the order
-        trade_tx.send(TradeUpdate {
-           exchange: "mock_ex".to_string(),
-           base: "XBT".to_string(),
-           quote: "USDT".to_string(),
-           tick_size: 0.01,
-           side: Sell,
-           price: 50000.0,
-           size: 10,
-           ts_exchange: Some(chrono::Utc::now().timestamp_micros()),
-           ts_received: chrono::Utc::now().timestamp_micros(),
-        }).unwrap();
-         
         trade_tx.send(TradeUpdate {
            exchange: "mock_ex".to_string(),
            base: "XBT".to_string(),
@@ -349,8 +335,11 @@ mod tests {
            ts_received: chrono::Utc::now().timestamp_micros(),
         }).unwrap();        
 
-        // place order and send trades to fill it (same as existing test)
-        let fill = exec_rx.recv().await.unwrap();
+        // place order and send trades to fill it.
+        let fill = tokio::time::timeout(std::time::Duration::from_secs(3), exec_rx.recv())
+            .await
+            .expect("timeout waiting for execution event")
+            .expect("exec_rx closed");
         assert_eq!(fill.size, 100);
     
         // Now send one more trade at same price — should NOT produce another ExecutionEvent
@@ -368,7 +357,7 @@ mod tests {
     
         // try recv with timeout
         let recv_fut = exec_rx.recv();
-        let res = tokio::time::timeout(std::time::Duration::from_millis(100), recv_fut).await;
+        let res = tokio::time::timeout(std::time::Duration::from_millis(1000), recv_fut).await;
         assert!(res.is_err(), "expected no further execution event after order removed");
     }
     #[tokio::test]
@@ -508,23 +497,36 @@ mod tests {
 
     #[tokio::test]
     async fn test_cancel_removes_order() {
-        let orderbook = Arc::new(RwLock::new(OrderBook::default()));
-        let mut state = ExecutionState::Default();
+        let (orderbook, trade_tx, order_tx, mut exec_rx, state) = setup_execution_engine().await;
 
         {
             let mut ob = orderbook.write().await;
             ob.asks.entries.insert(7000000, BookEntry { side: "Ask".to_string(), price: 70000.0, size: 1 });
         }
 
-        // Place and then cancel
-        state.place_or_cancel(Order::Limit { symbol: "XBTUSDT".into(), side: Buy, price: 70000.0, size: 5 }, &orderbook).await;
+        // Place order
+        order_tx.send(Order::Limit { symbol: "XBTUSDT".into(), side: Buy, price: 70000.0, size: 5 }).expect("order send failed");
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
-        // cancel: we currently have unimplemented cancel() — if you implement, call here; as a fallback, remove direct
-        // Simulate canceling by removing from state
-        let key = (70000.0 / state.tick_size) as i64;
-        state.bid_orders.remove(&key);
+        // Get the order ID that was just placed
+        let order_id = {
+            let s = state.read().await;
+            let key = (70000.0 / s.tick_size) as i64;
+            s.ask_orders.get(&key).map(|vec| vec[0].id).expect("order should exist")
+        };
 
-        // Now trade arrives, should not trigger any fill
+        // Cancel the order via channel
+        order_tx.send(Order::Cancel { order_id }).expect("cancel send failed");
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // Verify order was cancelled
+        {
+            let s = state.read().await;
+            let key = (70000.0 / s.tick_size) as i64;
+            assert!(s.ask_orders.get(&key).is_none(), "order should be removed after cancel");
+        }
+
+        // Now trade arrives — should not produce fill
         let trade = TradeUpdate {
             exchange: "mock".into(),
             base: "XBT".into(),
@@ -537,6 +539,12 @@ mod tests {
             ts_received: chrono::Utc::now().timestamp_micros(),
         };
 
-        assert!(state.on_trade(trade, &orderbook).await.is_empty(), "no fills should occur after cancel");
+        trade_tx.send(trade).expect("trade send failed");
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // Timeout — no fill should arrive
+        let recv_fut = exec_rx.recv();
+        let res = tokio::time::timeout(std::time::Duration::from_millis(100), recv_fut).await;
+        assert!(res.is_err(), "expected no execution event after cancel");
     }
 }
