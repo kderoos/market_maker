@@ -85,110 +85,94 @@ impl ExecutionState {
             }
         }
     }
-    pub async fn on_trade(&mut self, trade: TradeUpdate, orderbook: &Arc<RwLock<OrderBook>>) -> Option<ExecutionEvent> {
-        /// Process trade update, check against resting orders, and return fills
+        // Process one price level: mutate orders Vec, consume remaining_trade_size, return fills
+    fn process_level(
+        orders: &mut Vec<RestingOrder>,
+        qty_level: i64,
+        remaining_trade_size: &mut i64,
+        trade: &TradeUpdate,
+    ) -> Vec<ExecutionEvent> {
+        let mut fills = Vec::new();
+    
+        for order in orders.iter_mut() {
+            if *remaining_trade_size <= 0 {
+                break;
+            }
+        
+            let p = if qty_level > 0 {
+                1.0 - (order.size_ahead as f64 / qty_level as f64)
+            } else {
+                1.0
+            };
+            let r: f64 = rand::random();
+            if r < p {
+                let fill_size = std::cmp::min(order.qty_remaining, *remaining_trade_size);
+                order.qty_remaining -= fill_size;
+                *remaining_trade_size -= fill_size;
+            
+                let action = if order.qty_remaining > 0 {
+                    "Partial".to_string()
+                } else {
+                    "Full".to_string()
+                };
+            
+                fills.push(ExecutionEvent {
+                    action,
+                    order_id: order.id,
+                    side: order.side.clone(),
+                    price: order.price,
+                    size: fill_size,
+                    ts_exchange: trade.ts_exchange,
+                    ts_received: trade.ts_received,
+                });
+                // continue to allow a single large trade to hit multiple orders
+            } else {
+                // move trade forward in queue
+                order.size_ahead = order.size_ahead.saturating_sub(trade.size);
+            }
+        }
+    
+        // cleanup fully-filled orders
+        orders.retain(|o| o.qty_remaining > 0);
+        fills
+    }
+
+    pub async fn on_trade(&mut self, trade: TradeUpdate, orderbook: &Arc<RwLock<OrderBook>>) -> Vec<ExecutionEvent> {
         if self.tick_size == 0.0 {
             self.tick_size = trade.tick_size;
         }
         let key = (trade.price / self.tick_size) as i64;
-
+        let mut fills: Vec<ExecutionEvent> = Vec::new();
+        let mut remaining_trade_size = trade.size;
+    
         match trade.side {
             Buy => {
-                // Do the async read first (no mutable borrow of self while awaiting)
                 let qty_level = {
                     let ob = orderbook.read().await;
                     ob.bids.entries.get(&key).map_or(0, |lvl| lvl.size)
                 };
-
                 if let Some(orders) = self.bid_orders.get_mut(&key) {
-                    // Iterate mutably, perform fill inline (no awaits)
-                    let mut maybe_event: Option<ExecutionEvent> = None;
-                    for order in orders.iter_mut() {
-                        // avoid division by zero
-                        let p = if qty_level > 0 {
-                            1.0 - (order.size_ahead as f64 / qty_level as f64)
-                        } else {
-                            1.0
-                        };
-                        let r: f64 = rand::random();
-                        if r < p {
-                            // compute fill inline
-                            let fill_size = std::cmp::min(order.qty_remaining, trade.size);
-                            order.qty_remaining -= fill_size;
-                            maybe_event = Some(ExecutionEvent {
-                                action: "Fill".to_string(),
-                                order_id: order.id,
-                                side: order.side.clone(),
-                                price: order.price,
-                                size: fill_size,
-                                ts_exchange: trade.ts_exchange,
-                                ts_received: trade.ts_received,
-                            });
-                            break;
-                        } else {
-                            order.size_ahead = order.size_ahead.saturating_sub(trade.size);
-                        }
-                    }
-                    // drop mutable borrow to self.bid_orders by ending scope
-                    if let Some(ev) = maybe_event {
-                        // remove fully-filled orders now that mutable borrow ended
-                        if let Some(vec) = self.bid_orders.get_mut(&key) {
-                            vec.retain(|o| o.qty_remaining > 0);
-                            if vec.is_empty() {
-                                self.bid_orders.remove(&key);
-                            }
-                        }
-                        return Some(ev);
+                    fills.extend(Self::process_level(orders, qty_level, &mut remaining_trade_size, &trade));
+                    if self.bid_orders.get(&key).map_or(true, |v| v.is_empty()) {
+                        self.bid_orders.remove(&key);
                     }
                 }
-                None
             }
             Sell => {
-                // read level first
                 let qty_level = {
                     let ob = orderbook.read().await;
                     ob.asks.entries.get(&key).map_or(0, |lvl| lvl.size)
                 };
-
                 if let Some(orders) = self.ask_orders.get_mut(&key) {
-                    let mut maybe_event: Option<ExecutionEvent> = None;
-                    for order in orders.iter_mut() {
-                        let p = if qty_level > 0 {
-                            1.0 - (order.size_ahead as f64 / qty_level as f64)
-                        } else {
-                            1.0
-                        };
-                        let r: f64 = rand::random();
-                        if r < p {
-                            let fill_size = std::cmp::min(order.qty_remaining, trade.size);
-                            order.qty_remaining -= fill_size;
-                            maybe_event = Some(ExecutionEvent {
-                                action: "Fill".to_string(),
-                                order_id: order.id,
-                                side: order.side.clone(),
-                                price: order.price,
-                                size: fill_size,
-                                ts_exchange: trade.ts_exchange,
-                                ts_received: trade.ts_received,
-                            });
-                            break;
-                        } else {
-                            order.size_ahead = order.size_ahead.saturating_sub(trade.size);
-                        }
-                    }
-                    if let Some(ev) = maybe_event {
-                        if let Some(vec) = self.ask_orders.get_mut(&key) {
-                            vec.retain(|o| o.qty_remaining > 0);
-                            if vec.is_empty() {
-                                self.ask_orders.remove(&key);
-                            }
-                        }
-                        return Some(ev);
+                    fills.extend(Self::process_level(orders, qty_level, &mut remaining_trade_size, &trade));
+                    if self.ask_orders.get(&key).map_or(true, |v| v.is_empty()) {
+                        self.ask_orders.remove(&key);
                     }
                 }
-                None
             }
         }
+    
+        fills
     }
 }
 
@@ -205,7 +189,8 @@ pub async fn run(orderbook: Arc<RwLock<OrderBook>>,
             }
 
             Ok(trade) = trade_rx.recv() => {
-                if let Some(fill) = state.on_trade(trade, &orderbook).await {
+                let fills = state.on_trade(trade, &orderbook).await;
+                for fill in fills {
                     exec_tx.send(fill).unwrap();
                 }
             }
@@ -256,7 +241,8 @@ mod tests {
                     }
                     Ok(trade) = trade_rx.recv() => {
                         let mut s = state_clone.write().await;
-                        if let Some(fill) = s.on_trade(trade, &orderbook_clone).await {
+                        let fills = s.on_trade(trade, &orderbook_clone).await;
+                        for fill in fills {
                             let _ = exec_tx_clone.send(fill);
                         }
                     }
@@ -277,19 +263,6 @@ mod tests {
         // Place limit buy order
         order_tx.send(Order::Limit{ symbol: "XBTUSDT".to_string(), side: Buy, price: 50000.0, size: 100 }).unwrap();
 
-        // Simulate trade that should fill the order
-        // trade_tx.send(TradeUpdate {
-        //    exchange: "mock_ex".to_string(),
-        //    base: "XBT".to_string(),
-        //    quote: "USDT".to_string(),
-        //    tick_size: 0.01,
-        //    side: Sell,
-        //    price: 50000.0,
-        //    size: 10,
-        //    ts_exchange: Some(chrono::Utc::now().timestamp_micros()),
-        //    ts_received: chrono::Utc::now().timestamp_micros(),
-        // }).unwrap();
-        
         tokio::time::sleep(std::time::Duration::from_millis(100)).await; // allow some time for order to be processed
         assert_eq!(state.read().await.ask_orders.len(), 1, "there should be one resting order");
         let s = state.read().await.ask_orders.get(&5000000).unwrap()[0].clone();
@@ -444,7 +417,7 @@ mod tests {
         let t2 = TradeUpdate { size: 30, ..t1_clone };
         {
             let mut s = state.write().await;
-            let ev2 = s.on_trade(t2, &orderbook).await.expect("expected fill");
+            let ev2 = s.on_trade(t2, &orderbook).await.pop().expect("should have fill event");
             assert_eq!(ev2.size, 30);
         }
         // Check order removed
@@ -548,6 +521,6 @@ mod tests {
             ts_received: chrono::Utc::now().timestamp_micros(),
         };
 
-        assert!(state.on_trade(trade, &orderbook).await.is_none());
+        assert!(state.on_trade(trade, &orderbook).await.is_empty(), "no fills should occur after cancel");
     }
 }
