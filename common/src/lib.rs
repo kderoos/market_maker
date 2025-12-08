@@ -23,7 +23,7 @@ pub struct ExchangeConnectorCommand {
 pub enum Order {
     Market{ symbol: String, side: OrderSide, size: i64 },
     Limit{ symbol: String, side: OrderSide, price: f64, size: i64 },
-    Cancel{ order_id: String },
+    Cancel{ order_id: i64 },
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExecutionEvent {

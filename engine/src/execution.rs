@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, Ordering};
 use tokio::sync::broadcast::{Sender, Receiver};
 use tokio::sync::RwLock;
 use common::{BookEntry, TradeUpdate, Order, OrderSide, ExecutionEvent};
@@ -12,6 +13,14 @@ use chrono;
 // filled. Since we only receive accumulated volume at a price level and not the individual 
 // orders at a specific price we approximate "Fill" events using a statistical transaction 
 // probability (Monte Carlo). 
+
+// Order ID counter
+static NEXT_ORDER_ID: AtomicI64 = AtomicI64::new(1);
+
+fn next_order_id() -> i64 {
+    NEXT_ORDER_ID.fetch_add(1, Ordering::SeqCst)
+}
+
 #[derive(Debug, Clone)]
 struct RestingOrder {
     id: i64,
@@ -50,7 +59,7 @@ impl ExecutionState {
                             // Market Maker buys at ask side.
                             let size_ahead = ob.asks.entries.get(&key).map_or(0, |lvl| lvl.size);
                             let resting = RestingOrder {
-                                id: key,
+                                id: next_order_id(),
                                 side: Buy,
                                 price,
                                 qty_total: size,
@@ -64,7 +73,7 @@ impl ExecutionState {
                             // Market Maker sells at bid side.
                             let size_ahead = ob.bids.entries.get(&key).map_or(0, |lvl| lvl.size);
                             let resting = RestingOrder {
-                                id: key,
+                                id: next_order_id(),
                                 side: Sell,
                                 price,
                                 qty_total: size,
@@ -80,8 +89,15 @@ impl ExecutionState {
                 }
             }
             Order::Cancel{ order_id } => {
-                // Cancel order logic
-                unimplemented!();
+                // Remove order from both maps and clean up empty levels
+                self.bid_orders.retain(|_, orders| {
+                    orders.retain(|o| o.id != order_id);
+                    !orders.is_empty()
+                });
+                self.ask_orders.retain(|_, orders| {
+                    orders.retain(|o| o.id != order_id);
+                    !orders.is_empty()
+                });
             }
         }
     }
