@@ -12,6 +12,7 @@ use chrono;
 // filled. Since we only receive accumulated volume at a price level and not the individual 
 // orders at a specific price we approximate "Fill" events using a statistical transaction 
 // probability (Monte Carlo). 
+#[derive(Debug, Clone)]
 struct RestingOrder {
     id: i64,
     side: OrderSide,
@@ -46,8 +47,8 @@ impl ExecutionState {
                     let ob = orderbook.read().await;
                     match side {
                         Buy => {
-                            // let level = orderbook.read().await.bids.entries.get(&key);
-                            let size_ahead = ob.bids.entries.get(&key).map_or(0, |lvl| lvl.size);
+                            // Market Maker buys at ask side.
+                            let size_ahead = ob.asks.entries.get(&key).map_or(0, |lvl| lvl.size);
                             let resting = RestingOrder {
                                 id: key,
                                 side: Buy,
@@ -57,9 +58,10 @@ impl ExecutionState {
                                 size_ahead,
                             };
                             // Push to Vec or existing or create new Vec
-                            self.bid_orders.entry(key).or_insert_with(Vec::new).push(resting);
+                            self.ask_orders.entry(key).or_insert_with(Vec::new).push(resting);
                         }
                        Sell => {
+                            // Market Maker sells at bid side.
                             let size_ahead = ob.bids.entries.get(&key).map_or(0, |lvl| lvl.size);
                             let resting = RestingOrder {
                                 id: key,
@@ -69,7 +71,7 @@ impl ExecutionState {
                                 qty_remaining: size,
                                 size_ahead,
                             };
-                            self.ask_orders.entry(key).or_insert_with(Vec::new).push(resting);
+                            self.bid_orders.entry(key).or_insert_with(Vec::new).push(resting);
                         }
                         _ => {
                             println!("Unknown side: {}", side.to_string());
@@ -95,10 +97,10 @@ impl ExecutionState {
                 // Do the async read first (no mutable borrow of self while awaiting)
                 let qty_level = {
                     let ob = orderbook.read().await;
-                    ob.asks.entries.get(&key).map_or(0, |lvl| lvl.size)
+                    ob.bids.entries.get(&key).map_or(0, |lvl| lvl.size)
                 };
 
-                if let Some(orders) = self.ask_orders.get_mut(&key) {
+                if let Some(orders) = self.bid_orders.get_mut(&key) {
                     // Iterate mutably, perform fill inline (no awaits)
                     let mut maybe_event: Option<ExecutionEvent> = None;
                     for order in orders.iter_mut() {
@@ -114,6 +116,7 @@ impl ExecutionState {
                             let fill_size = std::cmp::min(order.qty_remaining, trade.size);
                             order.qty_remaining -= fill_size;
                             maybe_event = Some(ExecutionEvent {
+                                action: "Fill".to_string(),
                                 order_id: order.id,
                                 side: order.side.clone(),
                                 price: order.price,
@@ -126,13 +129,13 @@ impl ExecutionState {
                             order.size_ahead = order.size_ahead.saturating_sub(trade.size);
                         }
                     }
-                    // drop mutable borrow to self.ask_orders by ending scope
+                    // drop mutable borrow to self.bid_orders by ending scope
                     if let Some(ev) = maybe_event {
                         // remove fully-filled orders now that mutable borrow ended
-                        if let Some(vec) = self.ask_orders.get_mut(&key) {
+                        if let Some(vec) = self.bid_orders.get_mut(&key) {
                             vec.retain(|o| o.qty_remaining > 0);
                             if vec.is_empty() {
-                                self.ask_orders.remove(&key);
+                                self.bid_orders.remove(&key);
                             }
                         }
                         return Some(ev);
@@ -144,10 +147,10 @@ impl ExecutionState {
                 // read level first
                 let qty_level = {
                     let ob = orderbook.read().await;
-                    ob.bids.entries.get(&key).map_or(0, |lvl| lvl.size)
+                    ob.asks.entries.get(&key).map_or(0, |lvl| lvl.size)
                 };
 
-                if let Some(orders) = self.bid_orders.get_mut(&key) {
+                if let Some(orders) = self.ask_orders.get_mut(&key) {
                     let mut maybe_event: Option<ExecutionEvent> = None;
                     for order in orders.iter_mut() {
                         let p = if qty_level > 0 {
@@ -160,6 +163,7 @@ impl ExecutionState {
                             let fill_size = std::cmp::min(order.qty_remaining, trade.size);
                             order.qty_remaining -= fill_size;
                             maybe_event = Some(ExecutionEvent {
+                                action: "Fill".to_string(),
                                 order_id: order.id,
                                 side: order.side.clone(),
                                 price: order.price,
@@ -173,10 +177,10 @@ impl ExecutionState {
                         }
                     }
                     if let Some(ev) = maybe_event {
-                        if let Some(vec) = self.bid_orders.get_mut(&key) {
+                        if let Some(vec) = self.ask_orders.get_mut(&key) {
                             vec.retain(|o| o.qty_remaining > 0);
                             if vec.is_empty() {
-                                self.bid_orders.remove(&key);
+                                self.ask_orders.remove(&key);
                             }
                         }
                         return Some(ev);
@@ -208,6 +212,7 @@ pub async fn run(orderbook: Arc<RwLock<OrderBook>>,
         }
     }
 }
+use tokio::sync::oneshot;
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -232,23 +237,33 @@ mod tests {
         let orderbook_clone = orderbook.clone();
         let exec_tx_clone = exec_tx.clone();
 
+        // Initialize tick_size in state
+        {
+            let mut s = state.write().await;
+            s.tick_size = 0.01;
+        }
+    
+        let (ready_tx, ready_rx) = oneshot::channel();
         // Spawn the run task with shared state
         tokio::spawn(async move {
-            let mut state_mut = state_clone.write().await;
+            // Signal that the task is ready
+            let _ = ready_tx.send(());
             loop {
                 tokio::select! {
                     Ok(q) = order_rx.recv() => {
-                        state_mut.place_or_cancel(q, &orderbook_clone).await;
+                        let mut s = state_clone.write().await;
+                        s.place_or_cancel(q, &orderbook_clone).await;
                     }
                     Ok(trade) = trade_rx.recv() => {
-                        if let Some(fill) = state_mut.on_trade(trade, &orderbook_clone).await {
-                            exec_tx_clone.send(fill).unwrap();
+                        let mut s = state_clone.write().await;
+                        if let Some(fill) = s.on_trade(trade, &orderbook_clone).await {
+                            let _ = exec_tx_clone.send(fill);
                         }
                     }
                 }
             }
         });
-
+        _ = ready_rx.await; // wait for task to be ready 
         (orderbook, trade_tx, order_tx, exec_rx, state)
     }
     #[tokio::test]
@@ -257,25 +272,30 @@ mod tests {
         // create some qty_ahead in order book
         {
             let mut ob = orderbook.write().await;
-            ob.asks.entries.insert(5000000, BookEntry {side: "Ask".to_string(), price: 50000.0, size: 10 });
-            ob.asks.entries.insert(4999999, BookEntry {side: "Ask".to_string(), price: 49999.99, size: 1000 });
+            ob.asks.entries.insert(5000000, BookEntry {side: "Ask".to_string(), price: 50000.0, size: 0 });
         }
         // Place limit buy order
         order_tx.send(Order::Limit{ symbol: "XBTUSDT".to_string(), side: Buy, price: 50000.0, size: 100 }).unwrap();
 
         // Simulate trade that should fill the order
-        trade_tx.send(TradeUpdate {
-           exchange: "mock_ex".to_string(),
-           base: "XBT".to_string(),
-           quote: "USDT".to_string(),
-           tick_size: 0.01,
-           side: Sell,
-           price: 50000.0,
-           size: 10,
-           ts_exchange: Some(chrono::Utc::now().timestamp_micros()),
-           ts_received: chrono::Utc::now().timestamp_micros(),
-        }).unwrap();
-         
+        // trade_tx.send(TradeUpdate {
+        //    exchange: "mock_ex".to_string(),
+        //    base: "XBT".to_string(),
+        //    quote: "USDT".to_string(),
+        //    tick_size: 0.01,
+        //    side: Sell,
+        //    price: 50000.0,
+        //    size: 10,
+        //    ts_exchange: Some(chrono::Utc::now().timestamp_micros()),
+        //    ts_received: chrono::Utc::now().timestamp_micros(),
+        // }).unwrap();
+        
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await; // allow some time for order to be processed
+        assert_eq!(state.read().await.ask_orders.len(), 1, "there should be one resting order");
+        let s = state.read().await.ask_orders.get(&5000000).unwrap()[0].clone();
+        assert_eq!(s.qty_remaining, 100, "resting order should have full qty");
+        assert_eq!(s.size_ahead, 0, "size_ahead should be zero for deterministic fill");
+
         trade_tx.send(TradeUpdate {
            exchange: "mock_ex".to_string(),
            base: "XBT".to_string(),
@@ -289,7 +309,11 @@ mod tests {
         }).unwrap();        
 
         // Check for execution event
-        let fill = exec_rx.recv().await.unwrap();
+        let fill = tokio::time::timeout(std::time::Duration::from_secs(3), exec_rx.recv())
+            .await
+            .expect("timeout waiting for execution event")
+            .expect("exec_rx closed");
+
         assert_eq!(fill.size, 100);
         assert_eq!(fill.price, 50000.0);
         
@@ -360,22 +384,29 @@ mod tests {
     }
     #[tokio::test]
     async fn test_partial_fill_and_remains() {
-        let orderbook = Arc::new(RwLock::new(OrderBook::default()));
-        let mut state = ExecutionState::Default();
+        // Setup test environment
+        let (orderbook, trade_tx, order_tx, mut exec_rx, state) = setup_execution_engine().await;
 
+        // Deterministic fill: Size ahead is zero.
         {
             let mut ob = orderbook.write().await;
             ob.asks.entries.insert(4000000, BookEntry { side: "Ask".to_string(), price: 40000.0, size: 0 });
         }
 
         // Place buy order of size 50, first in que.
-        state.place_or_cancel(Order::Limit { symbol: "XBTUSDT".into(), side: Buy, price: 40000.0, size: 50 }, &orderbook).await;
+        order_tx.send(Order::Limit { symbol: "XBTUSDT".into(), side: Buy, price: 40000.0, size: 50 }).expect("order send failed");
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await; // let task process
 
-        // Update size in orderbook 10 
+        // Verify order was placed
         {
-            let mut ob = orderbook.write().await;
-            ob.asks.entries.insert(4000000, BookEntry { side: "Ask".to_string(), price: 40000.0, size: 20 });
-        }   
+            let s = state.read().await;
+            let key = (40000.0 / s.tick_size) as i64;
+            let vec = s.ask_orders.get(&key).expect("order should exist");
+            assert_eq!(vec[0].qty_remaining, 50);
+            assert_eq!(vec[0].qty_total, 50);
+            assert_eq!(vec[0].size_ahead, 0);
+        }
+
         // Trade smaller than order: 20 -> partial fill
         let t1 = TradeUpdate {
             exchange: "mock".into(),
@@ -391,38 +422,63 @@ mod tests {
 
         let t1_clone = t1.clone();
 
-        let ev1 = state.on_trade(t1, &orderbook).await.expect("expected partial fill");
-        assert_eq!(ev1.size, 20);
+        // First trade partially fills
+        trade_tx.send(t1).expect("trade send failed");
+        // Check for execution event
+        let fill1 =  exec_rx.recv()
+            .await
+            .expect("exec_rx closed"); 
+        assert_eq!(fill1.size, 20);
 
         // Check remaining quantity reduced
-        let key = (40000.0 / state.tick_size) as i64;
-        let vec = state.bid_orders.get(&key).expect("orders should remain");
-        assert_eq!(vec[0].qty_remaining, 30);
+        {
+            let s = state.read().await;
+            let key = (40000.0 / s.tick_size) as i64;
+            let vec = s.ask_orders.get(&key).expect("orders should remain");
+            assert_eq!(vec[0].qty_remaining, 30);
+            assert_eq!(vec[0].qty_total, 50);
+            assert_eq!(vec[0].size_ahead, 0);
+        }
 
         // Second trade fills the rest deterministically
         let t2 = TradeUpdate { size: 30, ..t1_clone };
-        let ev2 = state.on_trade(t2, &orderbook).await.expect("expected fill");
-        assert_eq!(ev2.size, 30);
-        // now order removed
-        assert!(state.bid_orders.get(&key).is_none());
+        {
+            let mut s = state.write().await;
+            let ev2 = s.on_trade(t2, &orderbook).await.expect("expected fill");
+            assert_eq!(ev2.size, 30);
+        }
+        // Check order removed
+        {
+            let s = state.read().await;
+            let key = (40000.0 / s.tick_size) as i64;
+            let vec = s.ask_orders.get(&key);
+            assert!(vec.is_none(), "order should be removed after full fill");
+        }
     }
 
     #[tokio::test]
     async fn test_multiple_orders_fifo() {
-        let orderbook = Arc::new(RwLock::new(OrderBook::default()));
-        let mut state = ExecutionState::Default();
-
-        // ensure opposite level present but bids absent so size_ahead==0 -> deterministic fills
+        // Setup test environment
+        let (orderbook, trade_tx, order_tx, mut exec_rx, state) = setup_execution_engine().await;
+        // Deterministic fill: Size ahead is zero.
         {
             let mut ob = orderbook.write().await;
-            ob.asks.entries.insert(6000000, BookEntry { side: "Ask".to_string(), price: 60000.0, size: 1 });
+            ob.asks.entries.insert(6000000, BookEntry { side: "Ask".to_string(), price: 60000.0, size: 0 });
         }
-
-        // Place two buy orders at same price (first smaller, second larger)
-        state.place_or_cancel(Order::Limit { symbol: "XBTUSDT".into(), side: Buy, price: 60000.0, size: 10 }, &orderbook).await;
-        state.place_or_cancel(Order::Limit { symbol: "XBTUSDT".into(), side: Buy, price: 60000.0, size: 20 }, &orderbook).await;
-
-        // A big sell trade arrives; first order should be filled first (FIFO)
+        // Place two buy orders at same price
+        order_tx.send(Order::Limit { symbol: "XBTUSDT".into(), side: Buy, price: 60000.0, size: 30 }).expect("order send failed");
+        order_tx.send(Order::Limit { symbol: "XBTUSDT".into(), side: Buy, price: 60000.0, size: 50 }).expect("order send failed");
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await; // let task process 
+        // Verify both orders were placed
+        {
+            let s = state.read().await;
+            let key = (60000.0 / s.tick_size) as i64;
+            let vec = s.ask_orders.get(&key).expect("orders should exist");
+            assert_eq!(vec.len(), 2, "there should be two resting orders");
+            assert_eq!(vec[0].qty_remaining, 30);
+            assert_eq!(vec[1].qty_remaining, 50);
+        }
+        // Trade of size 40 should fill first order (30) and partially fill second (10)
         let trade = TradeUpdate {
             exchange: "mock".into(),
             base: "XBT".into(),
@@ -430,18 +486,36 @@ mod tests {
             tick_size: 0.01,
             side: Sell,
             price: 60000.0,
-            size: 10,
+            size: 40,
             ts_exchange: Some(chrono::Utc::now().timestamp_micros()),
             ts_received: chrono::Utc::now().timestamp_micros(),
         };
+        trade_tx.send(trade).expect("trade send failed");
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await; // let task process
 
-        let ev1 = state.on_trade(trade.clone(), &orderbook).await.expect("expected first fill");
-        assert_eq!(ev1.size, 10);
+        // First fill event
+        let fill1 = tokio::time::timeout(std::time::Duration::from_secs(1), exec_rx.recv())
+            .await
+            .expect("timeout waiting for first fill")
+            .expect("exec_rx closed");
+        assert_eq!(fill1.size, 30, "first order should be fully filled");
 
-        // Next trade should hit the second order
-        let ev2 = state.on_trade(TradeUpdate { size: 20, ..trade }, &orderbook).await.expect("expected second fill");
-        assert_eq!(ev2.size, 20);
-    }
+        // Second fill event
+        let fill2 = tokio::time::timeout(std::time::Duration::from_secs(1), exec_rx.recv())
+            .await
+            .expect("timeout waiting for second fill")
+            .expect("exec_rx closed");
+
+        assert_eq!(fill2.size, 10, "second order should be partially filled");
+        // Check remaining quantity of second order
+        {
+            let s = state.read().await;
+            let key = (60000.0 / s.tick_size) as i64;
+            let vec = s.ask_orders.get(&key).expect("orders should remain");
+            assert_eq!(vec.len(), 1, "one order should remain");
+            assert_eq!(vec[0].qty_remaining, 40, "second order should have 40 remaining");
+        }   
+    }   
 
     #[tokio::test]
     async fn test_cancel_removes_order() {

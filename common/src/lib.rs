@@ -27,6 +27,7 @@ pub enum Order {
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExecutionEvent {
+    pub action: String,
     pub order_id: i64,
     pub side: OrderSide,
     pub price: f64,
