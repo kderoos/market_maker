@@ -195,28 +195,7 @@ impl ExecutionState {
         let mut fills = Vec::new();
         let mut keys_to_remove = Vec::new(); // collect keys first, then remove
         match trade.side {
-            // Buy => {
-            //     // iterate ask_keys ascending (best asks first) and stop when key*tick > trade_price
-            //     for &key in &self.bid_keys {
-            //         if (key as f64 * self.tick_size) > trade_price { break; }
-            //         if remaining_trade_size <= 0 { break; }
-            //         let qty_level = {
-            //             let ob = orderbook.read().await;
-            //             ob.bids.entries.get(&key).map_or(0, |lvl| lvl.size)
-            //         };
-            //         if let Some(orders) = self.bid_orders.get_mut(&key) {
-            //             fills.extend(Self::process_level(orders, qty_level, &mut remaining_trade_size, &trade));
-            //             if orders.is_empty() {
-            //                 self.bid_orders.remove(&key);
-            //                 keys_to_remove.push(key);
-            //             }
-            //         }
-            //     }
-            //     // Remove keys
-            //     for key in keys_to_remove{
-            //         Self::remove_key(&mut self.bid_keys, key);
-            //     }
-            // }
+
             Buy => {
                 // iterate bid_keys ascending (best bids first)
                 for &key in self.bid_keys.iter() {
