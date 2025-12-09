@@ -195,42 +195,110 @@ impl ExecutionState {
         let mut fills = Vec::new();
         let mut keys_to_remove = Vec::new(); // collect keys first, then remove
         match trade.side {
+            // Buy => {
+            //     // iterate ask_keys ascending (best asks first) and stop when key*tick > trade_price
+            //     for &key in &self.bid_keys {
+            //         if (key as f64 * self.tick_size) > trade_price { break; }
+            //         if remaining_trade_size <= 0 { break; }
+            //         let qty_level = {
+            //             let ob = orderbook.read().await;
+            //             ob.bids.entries.get(&key).map_or(0, |lvl| lvl.size)
+            //         };
+            //         if let Some(orders) = self.bid_orders.get_mut(&key) {
+            //             fills.extend(Self::process_level(orders, qty_level, &mut remaining_trade_size, &trade));
+            //             if orders.is_empty() {
+            //                 self.bid_orders.remove(&key);
+            //                 keys_to_remove.push(key);
+            //             }
+            //         }
+            //     }
+            //     // Remove keys
+            //     for key in keys_to_remove{
+            //         Self::remove_key(&mut self.bid_keys, key);
+            //     }
+            // }
             Buy => {
-                // iterate ask_keys ascending (best asks first) and stop when key*tick > trade_price
-                for &key in &self.bid_keys {
-                    if (key as f64 * self.tick_size) > trade_price { break; }
-                    if remaining_trade_size <= 0 { break; }
-                    let qty_level = {
-                        let ob = orderbook.read().await;
-                        ob.bids.entries.get(&key).map_or(0, |lvl| lvl.size)
-                    };
-                    if let Some(orders) = self.bid_orders.get_mut(&key) {
-                        fills.extend(Self::process_level(orders, qty_level, &mut remaining_trade_size, &trade));
-                        if orders.is_empty() {
-                            self.bid_orders.remove(&key);
-                            keys_to_remove.push(key);
+                // iterate bid_keys ascending (best bids first)
+                for &key in self.bid_keys.iter() {
+                    let ob_level = (key as f64 * self.tick_size);
+                    if ob_level > trade_price { break; }
+                    else if ob_level < trade_price {
+                        // Fill order
+                        if let Some(orders) = self.bid_orders.get_mut(&key){
+                            for order in orders{
+                                fills.push(ExecutionEvent{
+                                    action: "Full".to_string(),
+                                    order_id: order.id,
+                                    side: Sell,
+                                    price: order.price,
+                                    size: order.qty_remaining,
+                                    ts_exchange: trade.ts_exchange,
+                                    ts_received: trade.ts_received,
+                                });
+ 
+                            }
+                        }
+                        // Remove key.
+                        keys_to_remove.push(key);
+                        // Continue with next key.
+                        continue;
+                    } else {
+                        if remaining_trade_size <= 0 { break; }
+                        let qty_level = {
+                            let ob = orderbook.read().await;
+                            ob.bids.entries.get(&key).map_or(0, |lvl| lvl.size)
+                        };
+                        if let Some(orders) = self.bid_orders.get_mut(&key) {
+                            fills.extend(Self::process_level(orders, qty_level, &mut remaining_trade_size, &trade));
+                            if orders.is_empty() {
+                                self.bid_orders.remove(&key);
+                                keys_to_remove.push(key);
+                            }
                         }
                     }
                 }
-                // Remove keys
-                for key in keys_to_remove{
+                //remove key
+                for key in keys_to_remove {
                     Self::remove_key(&mut self.bid_keys, key);
                 }
             }
             Sell => {
-                // iterate bid_keys descending (best bids first)
+                // iterate ask_keys descending (best asks first)
                 for &key in self.ask_keys.iter().rev() {
-                    if (key as f64 * self.tick_size) < trade_price { break; } // trade_price crosses levels >= price?
-                    if remaining_trade_size <= 0 { break; }
-                    let qty_level = {
-                        let ob = orderbook.read().await;
-                        ob.asks.entries.get(&key).map_or(0, |lvl| lvl.size)
-                    };
-                    if let Some(orders) = self.ask_orders.get_mut(&key) {
-                        fills.extend(Self::process_level(orders, qty_level, &mut remaining_trade_size, &trade));
-                        if orders.is_empty() {
-                            self.ask_orders.remove(&key);
-                            keys_to_remove.push(key);
+                    let ob_level = (key as f64 * self.tick_size);
+                    if ob_level < trade_price { break; }
+                    else if ob_level > trade_price {
+                        // Fill order
+                        if let Some(orders) = self.ask_orders.get_mut(&key){
+                            for order in orders{
+                                fills.push(ExecutionEvent{
+                                    action: "Full".to_string(),
+                                    order_id: order.id,
+                                    side: Buy,
+                                    price: order.price,
+                                    size: order.qty_remaining,
+                                    ts_exchange: trade.ts_exchange,
+                                    ts_received: trade.ts_received,
+                                });
+ 
+                            }
+                        }
+                        // Remove key.
+                        keys_to_remove.push(key);
+                        // Continue with next key.
+                        continue;
+                    } else {
+                        if remaining_trade_size <= 0 { break; }
+                        let qty_level = {
+                            let ob = orderbook.read().await;
+                            ob.asks.entries.get(&key).map_or(0, |lvl| lvl.size)
+                        };
+                        if let Some(orders) = self.ask_orders.get_mut(&key) {
+                            fills.extend(Self::process_level(orders, qty_level, &mut remaining_trade_size, &trade));
+                            if orders.is_empty() {
+                                self.ask_orders.remove(&key);
+                                keys_to_remove.push(key);
+                            }
                         }
                     }
                 }
@@ -243,43 +311,6 @@ impl ExecutionState {
 
         fills
     }
-    // pub async fn on_trade(&mut self, trade: TradeUpdate, orderbook: &Arc<RwLock<OrderBook>>) -> Vec<ExecutionEvent> {
-    //     if self.tick_size == 0.0 {
-    //         self.tick_size = trade.tick_size;
-    //     }
-    //     let key = (trade.price / self.tick_size) as i64;
-    //     let mut fills: Vec<ExecutionEvent> = Vec::new();
-    //     let mut remaining_trade_size = trade.size;
-    
-    //     match trade.side {
-    //         Buy => {
-    //             let qty_level = {
-    //                 let ob = orderbook.read().await;
-    //                 ob.bids.entries.get(&key).map_or(0, |lvl| lvl.size)
-    //             };
-    //             if let Some(orders) = self.bid_orders.get_mut(&key) {
-    //                 fills.extend(Self::process_level(orders, qty_level, &mut remaining_trade_size, &trade));
-    //                 if self.bid_orders.get(&key).map_or(true, |v| v.is_empty()) {
-    //                     self.bid_orders.remove(&key);
-    //                 }
-    //             }
-    //         }
-    //         Sell => {
-    //             let qty_level = {
-    //                 let ob = orderbook.read().await;
-    //                 ob.asks.entries.get(&key).map_or(0, |lvl| lvl.size)
-    //             };
-    //             if let Some(orders) = self.ask_orders.get_mut(&key) {
-    //                 fills.extend(Self::process_level(orders, qty_level, &mut remaining_trade_size, &trade));
-    //                 if self.ask_orders.get(&key).map_or(true, |v| v.is_empty()) {
-    //                     self.ask_orders.remove(&key);
-    //                 }
-    //             }
-    //         }
-    //     }
-    
-    //     fills
-    // }
 }
 
 pub async fn run(orderbook: Arc<RwLock<OrderBook>>,
@@ -710,7 +741,7 @@ mod tests {
            quote: "USDT".to_string(),
            tick_size: 0.01,
            side: Sell,
-           price: 90001.0,
+           price: 89999.0,
            size: 1, 
            ts_exchange: Some(chrono::Utc::now().timestamp_micros()),
            ts_received: chrono::Utc::now().timestamp_micros(),
