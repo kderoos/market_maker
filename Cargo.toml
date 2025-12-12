@@ -4,6 +4,6 @@ members = [
     "engine",
     "api",
     "connectors-bitvavo",
-    "connectors-bitmex", "strategy",
+    "connectors-bitmex", "strategy", "utils",
 ]
 

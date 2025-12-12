@@ -92,11 +92,21 @@ pub struct PenetrationUpdate{
     pub fit_A: Option<f64>,
     pub fit_k: Option<f64>,
 }
+#[derive(Debug, Clone, Serialize)]
+pub struct Candle {
+    pub ts_start: i64,   // epoch ms for the start of candle bucket
+    pub open: f64,
+    pub high: f64,
+    pub low: f64,
+    pub close: f64,
+    pub volume: f64,
+}
 #[derive(Debug,Clone, Serialize)]
 pub enum AnyWsUpdate {
     Depth(DepthSnapshot),
     Trade(TradeUpdate),
     Penetration(PenetrationUpdate),
+    TradeCandle(Candle),
 }
 //Traits required by HashSet
 #[derive(Hash, Eq, PartialEq, Clone, Debug)]
