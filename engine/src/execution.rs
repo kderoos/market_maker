@@ -170,6 +170,7 @@ impl ExecutionState {
             
                 fills.push(ExecutionEvent {
                     action,
+                    symbol: trade.base.clone() + &trade.quote,
                     order_id: order.id,
                     side: order.side.clone(),
                     price: order.price,
@@ -195,11 +196,10 @@ impl ExecutionState {
         let mut fills = Vec::new();
         let mut keys_to_remove = Vec::new(); // collect keys first, then remove
         match trade.side {
-
             Buy => {
                 // iterate bid_keys ascending (best bids first)
                 for &key in self.bid_keys.iter() {
-                    let ob_level = (key as f64 * self.tick_size);
+                    let ob_level = key as f64 * self.tick_size;
                     if ob_level > trade_price { break; }
                     else if ob_level < trade_price {
                         // Fill order
@@ -207,6 +207,7 @@ impl ExecutionState {
                             for order in orders{
                                 fills.push(ExecutionEvent{
                                     action: "Full".to_string(),
+                                    symbol: trade.base.clone() + &trade.quote,
                                     order_id: order.id,
                                     side: Sell,
                                     price: order.price,
@@ -244,7 +245,7 @@ impl ExecutionState {
             Sell => {
                 // iterate ask_keys descending (best asks first)
                 for &key in self.ask_keys.iter().rev() {
-                    let ob_level = (key as f64 * self.tick_size);
+                    let ob_level = key as f64 * self.tick_size;
                     if ob_level < trade_price { break; }
                     else if ob_level > trade_price {
                         // Fill order
@@ -252,6 +253,7 @@ impl ExecutionState {
                             for order in orders{
                                 fills.push(ExecutionEvent{
                                     action: "Full".to_string(),
+                                    symbol: trade.base.clone() + &trade.quote,
                                     order_id: order.id,
                                     side: Buy,
                                     price: order.price,

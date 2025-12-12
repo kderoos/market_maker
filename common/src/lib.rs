@@ -28,6 +28,7 @@ pub enum Order {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExecutionEvent {
     pub action: String,
+    pub symbol: String,
     pub order_id: i64,
     pub side: OrderSide,
     pub price: f64,
@@ -76,7 +77,7 @@ pub enum AnyUpdate {
     TradeUpdate(TradeUpdate),
     BookUpdate(BookUpdate),
 }
-#[derive(Clone, Serialize)]
+#[derive(Debug,Clone, Serialize)]
 pub struct DepthSnapshot{
     pub timestamp: i64,
     pub len: u32,
@@ -91,7 +92,7 @@ pub struct PenetrationUpdate{
     pub fit_A: Option<f64>,
     pub fit_k: Option<f64>,
 }
-#[derive(Clone, Serialize)]
+#[derive(Debug,Clone, Serialize)]
 pub enum AnyWsUpdate {
     Depth(DepthSnapshot),
     Trade(TradeUpdate),
