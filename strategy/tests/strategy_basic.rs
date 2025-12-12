@@ -31,94 +31,7 @@ impl Strategy for TestStrategy {
 }
 
 #[tokio::test]
-async fn test_strategy_produces_order_on_market_update() {
-    // Channels used by strategy runner
-    let (tx_market, rx_market) = broadcast::channel(16);
-    let (tx_exec, rx_exec)     = broadcast::channel(16);
-    let (tx_order, mut rx_order) = broadcast::channel(16);
-
-    // Strategy under test
-    let strat = TestStrategy::default();
-
-    // Spawn strategy runner
-    tokio::spawn(run_strategy(
-        strat,
-        rx_market,
-        rx_exec,
-        tx_order.clone(),
-    ));
-
-    // Send a market update
-    let update = AnyWsUpdate::Trade(TradeUpdate {
-        exchange: "TestEx".to_string(),
-        tick_size: 0.01,
-        base: "BTC".to_string(),
-        quote: "USDT".to_string(),
-        side: OrderSide::Buy,
-        price: 101.0,
-        size: 1,
-        ts_exchange: Some(1234567890),
-        ts_received: 1234567891,
-    });
-
-    tx_market.send(update).unwrap();
-
-    // Expect an order output
-    let received = rx_order.recv().await.unwrap();
-
-    match received {
-        Order::Limit { symbol, side, price, size } => {
-            assert_eq!(symbol, "BTCUSDT");
-            assert_eq!(side, OrderSide::Buy);
-            assert_eq!(price, 101.0);
-            assert_eq!(size, 1);
-        }
-        _ => panic!("Expected limit order"),
-    }
-}
-
-#[tokio::test]
-async fn test_strategy_receives_fills_2() {
-    let (tx_market, rx_market) = broadcast::channel(16);
-    let (tx_exec, rx_exec)     = broadcast::channel(16);
-    let (tx_order, _rx_order)  = broadcast::channel(16);
-
-    let strat = TestStrategy::default();
-    // let strat_ref = std::sync::Arc::new(tokio::sync::Mutex::new(strat));
-    let strat_runner_ref = strat.clone();
-
-    tokio::spawn(async move {
-        run_strategy(
-            strat_runner_ref,
-            // strat,
-            rx_market,
-            rx_exec,
-            tx_order
-        );
-    });
-
-    // Send a fill
-    let fill = ExecutionEvent {
-        action: "fill".into(),
-        symbol: "BTCUSDT".into(),
-        side: OrderSide::Buy,
-        size: 1,
-        price: 100.0,
-        order_id: 42,
-        ts_exchange: Some(1234567888),
-        ts_received: 1234567890,
-    };
-
-    tx_exec.send(fill).unwrap();
-
-    // Wait briefly for async processing
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-
-    // Verify fill was counted
-    assert_eq!(strat.seen_fills, 1);
-}
-#[tokio::test]
-async fn test_strategy_receives_fills() {
+async fn test_strategy_fills() {
     let mut strat = TestStrategy::default();
 
     let fill = ExecutionEvent {
@@ -138,4 +51,32 @@ async fn test_strategy_receives_fills() {
     // Verify fill was counted
     assert_eq!(strat.seen_fills, 1);
 }
-
+#[tokio::test]
+async fn test_strategy_market() {
+    let mut strat = TestStrategy::default();
+    let trade_update = TradeUpdate {
+        exchange: "TestExchange".into(),
+        tick_size: 0.01,
+        base: "BTC".into(),
+        quote: "USDT".into(),
+        side: OrderSide::Buy,
+        price: 150.0,
+        size: 1,
+        ts_exchange: Some(1234567888),
+        ts_received: 1234567890,
+    };
+    let market_update = AnyWsUpdate::Trade(trade_update);
+    let orders = strat.on_market(&market_update);
+    // Verify market update was counted
+    assert_eq!(strat.seen_market, 1);
+    // Verify an order was produced
+    assert_eq!(orders.len(), 1);
+    if let Order::Limit{ symbol, side, price, size } = &orders[0] {
+        assert_eq!(symbol, "BTCUSDT");
+        assert_eq!(*side, OrderSide::Buy);
+        assert_eq!(*price, 150.0);
+        assert_eq!(*size, 1);
+    } else {
+        panic!("Expected Limit order");
+    }
+}
