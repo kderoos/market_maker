@@ -24,6 +24,7 @@ fn next_order_id() -> i64 {
 #[derive(Debug, Clone)]
 struct RestingOrder {
     id: i64,
+    client_id: Option<u64>,
     side: OrderSide,
     price: f64,
     qty_total: i64,
@@ -34,9 +35,13 @@ struct ExecutionState {
     pub tick_size: f64,
     pub bid_orders: HashMap<i64, Vec<RestingOrder>>, // keyed by order id
     pub ask_orders: HashMap<i64, Vec<RestingOrder>>, 
+    
     // cached sorted keys for quick iteration.
     pub bid_keys: Vec<i64>,
     pub ask_keys: Vec<i64>,
+
+    //map client_id to order_id for easy replacement/cancellation
+    pub by_client_id: HashMap<u64, i64>,
 }
 impl ExecutionState {
     pub fn Default() -> Self {
@@ -47,6 +52,7 @@ impl ExecutionState {
             ask_orders: HashMap::new(),
             bid_keys: Vec::new(),
             ask_keys: Vec::new(),
+            by_client_id: HashMap::new(),
         }
     }
     // insert into sorted keys vec if missing
@@ -63,9 +69,23 @@ impl ExecutionState {
             keys.remove(pos);
         }
     }
+    async fn replace_limit(
+        &mut self,
+        client_id: u64,
+        new_order: Order,
+        orderbook: &Arc<RwLock<OrderBook>>,
+    ) {
+        // Cancel existing order if present
+        if let Some(order_id) = self.by_client_id.remove(&client_id) {
+            self.place_or_cancel(Order::Cancel { order_id }, orderbook).await;
+        }
+
+        // Place new order
+        self.place_or_cancel(new_order, orderbook).await;
+    }
     pub async fn place_or_cancel(&mut self, order: Order, orderbook: &Arc<RwLock<OrderBook>>) {
         match order {
-            Order::Market{ symbol, side, size } => {
+            Order::Market{ symbol, side, size, client_id } => {
                 // Place market order logic
                 unimplemented!();
             }
@@ -73,17 +93,24 @@ impl ExecutionState {
                 if self.tick_size > 0.0 {
                     let key = (price/self.tick_size) as i64;
                     let ob = orderbook.read().await;
+
+                    let order_id = next_order_id();
+                    if let Some(cid) = client_id {
+                        self.by_client_id.insert(cid, order_id);
+                    }
                     match side {
                         Buy => {
                             // Limit Buy at ask side.
                             let size_ahead = ob.asks.entries.get(&key).map_or(0, |lvl| lvl.size);
                             let resting = RestingOrder {
-                                id: next_order_id(),
+                                id: order_id,
                                 side: Buy,
                                 price,
                                 qty_total: size,
                                 qty_remaining: size,
                                 size_ahead,
+                                client_id,
+
                             };
                             // Push resting order and keep keys cached
                             match self.ask_orders.entry(key) {
@@ -98,12 +125,13 @@ impl ExecutionState {
                             // Limit sell at bid side.
                             let size_ahead = ob.bids.entries.get(&key).map_or(0, |lvl| lvl.size);
                             let resting = RestingOrder {
-                                id: next_order_id(),
+                                id: order_id,
                                 side: Sell,
                                 price,
                                 qty_total: size,
                                 qty_remaining: size,
                                 size_ahead,
+                                client_id,
                             };
                             // Push resting order and keep keys cached
                             match self.bid_orders.entry(key) {
