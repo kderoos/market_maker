@@ -3,6 +3,9 @@ use common::{AnyWsUpdate, Order, OrderSide, ExecutionEvent};
 use ta::indicators::ExponentialMovingAverage;
 use ta::Next;
 
+const BID_ID: u64 = 1;
+const ASK_ID: u64 = 2;
+
 pub struct MomentumStrategy {
     ema_fast: ExponentialMovingAverage,
     ema_slow: ExponentialMovingAverage,
@@ -85,6 +88,7 @@ impl Strategy for MomentumStrategy {
                     side: OrderSide::Buy,
                     price: t.price,
                     size: self.size,
+                    client_id: Some(BID_ID),
                 });
             }
 
@@ -94,6 +98,7 @@ impl Strategy for MomentumStrategy {
                     side: OrderSide::Sell,
                     price: t.price,
                     size: self.size,
+                    client_id: Some(ASK_ID),
                 });
             }
 
