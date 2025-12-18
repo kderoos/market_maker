@@ -1,14 +1,9 @@
 use std::sync::{Arc, RwLock};
-// use tokio::sync::mpsc;
 use tokio::sync::broadcast;
 use common::{AnyUpdate, BookEntry,BookUpdate};
 use std::collections::{HashMap}; 
 
-// use std::any::type_name;
 
-// type BTreeOrderBook = OrderBook<BTreeMap<i64, BookEntry>>;
-// type HashOrderBook = OrderBook<HashMap<i64, BookEntry>>;
-// pub type OrderBook = HashMap<String, BookEntry>; // key: "symbol:id"
 
 pub struct OrderBookSide {
     // pub entries: BTreeMap<i64,BookEntry>,// price*100 as key
@@ -94,10 +89,6 @@ pub async fn update_book_state(book_update: BookUpdate, book_state: Arc<RwLock<O
                 }
             }
         }
-        // let elapsed = start.elapsed().as_nanos();
-        // count += 1;
-        // avg_time = ((avg_time * (count - 1)) + elapsed) / count;
-        // println!("Book {} processed in {:?} (av: {})", book_update.action.as_str(), elapsed, avg_time);
     }
 pub async fn pub_book_depth(tx_ws: broadcast::Sender<common::AnyWsUpdate>, book_state: Arc<RwLock<OrderBook>>) {
     println!("Book depth publisher starting...");
@@ -156,17 +147,9 @@ pub async fn book_engine(mut rx: broadcast::Receiver<AnyUpdate>, book_state: Arc
     // let mut avg_time: u128 = 0;
     while let Ok(update) = rx.recv().await {
         if let AnyUpdate::BookUpdate(book_update) = update {
-            // println!("Book engine received update with {} entries, action: {}", book_update.data.len(), book_update.action);
-            // let start = std::time::Instant::now();
             update_book_state(book_update, book_state.clone()).await;
             let state = book_state.read().unwrap();
-            // println!("Book has {} bids and {} asks",state.bids.entries.len(),state.asks.entries.len());
             let best_bid = top_n_with_padding(&state.bids.entries,1,true);
-            // println!("Best bid price: {} and size: {}",best_bid[0].0,best_bid[0].1);
-            // let elapsed = start.elapsed().as_nanos();
-            // count += 1;
-            // avg_time = ((avg_time * (count - 1)) + elapsed) / count;
-            // println!("Book engine processed update in {:?} (av:{:?})", elapsed, avg_time); 
             }
     }
 }
@@ -280,28 +263,3 @@ mod tests {
         }
     }
 }
-// pub async fn print_book_btree(book_state: Arc<RwLock<OrderBook>>) {
-//     let mut count: u128 = 0;
-//     let mut avg_time: u128 = 0;
-//     loop {
-//         let start= std::time::Instant::now();
-//         {
-//             let state = book_state.read().unwrap();
-//             println!("Order Book Snapshot:");
-//             println!("Bids:");
-//             for (_, entry) in state.bids.entries.iter().rev().take(5) {
-//                 println!("Price: {:.1}, Size: {}", entry.price, entry.size);
-//             }
-//             println!("Asks:");
-//             for (_, entry) in state.asks.entries.iter().take(5) {
-//                 println!("Price: {}, Size: {}", entry.price, entry.size);
-//             }
-//         }
-//         let elapsed = start.elapsed().as_nanos();
-//         count += 1;
-//         avg_time = ((avg_time * (count - 1)) + elapsed) / count;
-//         println!("Top-of-book extraction took {:?} (av:{:?})", elapsed, avg_time);
-
-//         tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
-//     }
-// }
