@@ -31,7 +31,7 @@ impl OrderBook {
             .copied();
 
         match (best_bid_tick, best_ask_tick) {
-            (Some(bid), Some(ask)) => Some((bid + ask).wrapping_div(2) as u64),
+            (Some(bid), Some(ask)) => Some((bid + ask).wrapping_sub(2) as u64),
             _ => None,
         }
     } 
