@@ -105,6 +105,7 @@ pub struct Candle {
 pub enum AnyWsUpdate {
     Depth(DepthSnapshot),
     Trade(TradeUpdate),
+    Quote(QuoteUpdate),
     Penetration(PenetrationUpdate),
     TradeCandle(Candle),
 }
