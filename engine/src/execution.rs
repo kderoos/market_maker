@@ -108,8 +108,8 @@ impl ExecutionState {
                     }
                     match side {
                         Buy => {
-                            // Limit Buy at ask side.
-                            let size_ahead = ob.asks.entries.get(&key).map_or(0, |lvl| lvl.size);
+                            // Limit Buy rests at bid side.
+                            let size_ahead = ob.bids.entries.get(&key).map_or(0, |lvl| lvl.size);
                             let resting = RestingOrder {
                                 id: order_id,
                                 side: Buy,
@@ -121,17 +121,17 @@ impl ExecutionState {
 
                             };
                             // Push resting order and keep keys cached
-                            match self.ask_orders.entry(key) {
+                            match self.bid_orders.entry(key) {
                                 Entry::Occupied(mut occ) => occ.get_mut().push(resting),
                                 Entry::Vacant(vac) => {
                                     vac.insert(vec![resting]);
-                                    Self::insert_key(&mut self.ask_keys, key);
+                                    Self::insert_key(&mut self.bid_keys, key);
                                 }
                             }
                         }
                        Sell => {
-                            // Limit sell at bid side.
-                            let size_ahead = ob.bids.entries.get(&key).map_or(0, |lvl| lvl.size);
+                            // Limit sell rests at ask side.
+                            let size_ahead = ob.asks.entries.get(&key).map_or(0, |lvl| lvl.size);
                             let resting = RestingOrder {
                                 id: order_id,
                                 side: Sell,
@@ -142,11 +142,11 @@ impl ExecutionState {
                                 client_id,
                             };
                             // Push resting order and keep keys cached
-                            match self.bid_orders.entry(key) {
+                            match self.ask_orders.entry(key) {
                                 Entry::Occupied(mut occ) => occ.get_mut().push(resting),
                                 Entry::Vacant(vac) => {
                                     vac.insert(vec![resting]);
-                                    Self::insert_key(&mut self.bid_keys, key);
+                                    Self::insert_key(&mut self.ask_keys, key);
                                 }
                             }
                         }
@@ -241,12 +241,69 @@ impl ExecutionState {
         let mut fills = Vec::new();
         let mut keys_to_remove = Vec::new(); // collect keys first, then remove
         match trade.side {
+            //Market Buy consumes from the ask side (resting sells)
             Buy => {
-                // iterate bid_keys ascending (best bids first)
-                for &key in self.bid_keys.iter() {
+                // iterate ask_keys ascending (best asks first)
+                for &key in self.ask_keys.iter() {
                     let ob_level = key as f64 * self.tick_size;
                     if ob_level > trade_price { break; }
                     else if ob_level < trade_price {
+                        // If price moved past level without fill, 
+                        // correct by filling all orders at level.
+                        if let Some(orders) = self.ask_orders.get_mut(&key){
+                            for order in orders{
+                                fills.push(ExecutionEvent{
+                                    action: "Full".to_string(),
+                                    symbol: trade.base.clone() + &trade.quote,
+                                    order_id: order.id,
+                                    side: Sell,
+                                    price: order.price,
+                                    size: order.qty_remaining,
+                                    ts_exchange: trade.ts_exchange,
+                                    ts_received: trade.ts_received,
+                                });
+                                self.by_client_id.retain(|_, &mut v| v != order.id);
+ 
+                            }
+                        }
+                        // Remove key.
+                        keys_to_remove.push(key);
+                        // Continue with next key.
+                        continue;
+                    } else {
+                        // Trade price matches level — process fills statistically.
+                        if remaining_trade_size <= 0 { break; }
+                        let qty_level = {
+                            let ob = orderbook.read().await;
+                            ob.asks.entries.get(&key).map_or(0, |lvl| lvl.size)
+                        };
+                        if let Some(orders) = self.ask_orders.get_mut(&key) {
+                            let (new_fills, fill_ids) = Self::process_level(orders, qty_level, &mut remaining_trade_size, &trade);
+                            fills.extend(new_fills);
+                            // remove filled orders from by_client_id
+                            for &fill_id in &fill_ids {
+                                self.by_client_id.retain(|_, &mut v| v != fill_id);
+                            }
+                            // cleanup empty levels
+                            if orders.is_empty() {
+                                self.ask_orders.remove(&key);
+                                keys_to_remove.push(key);
+                            }
+                        }
+                    }
+                }
+                //remove key
+                for key in keys_to_remove {
+                    Self::remove_key(&mut self.ask_keys, key);
+                }
+            }
+            //Market Sell consumes from the bid side (resting buys)
+            Sell => {
+                // iterate bid_keys descending (best bids first)
+                for &key in self.bid_keys.iter().rev() {
+                    let ob_level = key as f64 * self.tick_size;
+                    if ob_level < trade_price { break; }
+                    else if ob_level > trade_price {
                         // Fill order
                         if let Some(orders) = self.bid_orders.get_mut(&key){
                             for order in orders{
@@ -254,7 +311,7 @@ impl ExecutionState {
                                     action: "Full".to_string(),
                                     symbol: trade.base.clone() + &trade.quote,
                                     order_id: order.id,
-                                    side: Sell,
+                                    side: Buy,
                                     price: order.price,
                                     size: order.qty_remaining,
                                     ts_exchange: trade.ts_exchange,
@@ -292,59 +349,6 @@ impl ExecutionState {
                 //remove key
                 for key in keys_to_remove {
                     Self::remove_key(&mut self.bid_keys, key);
-                }
-            }
-            Sell => {
-                // iterate ask_keys descending (best asks first)
-                for &key in self.ask_keys.iter().rev() {
-                    let ob_level = key as f64 * self.tick_size;
-                    if ob_level < trade_price { break; }
-                    else if ob_level > trade_price {
-                        // Fill order
-                        if let Some(orders) = self.ask_orders.get_mut(&key){
-                            for order in orders{
-                                fills.push(ExecutionEvent{
-                                    action: "Full".to_string(),
-                                    symbol: trade.base.clone() + &trade.quote,
-                                    order_id: order.id,
-                                    side: Buy,
-                                    price: order.price,
-                                    size: order.qty_remaining,
-                                    ts_exchange: trade.ts_exchange,
-                                    ts_received: trade.ts_received,
-                                });
-                                self.by_client_id.retain(|_, &mut v| v != order.id);
- 
-                            }
-                        }
-                        // Remove key.
-                        keys_to_remove.push(key);
-                        // Continue with next key.
-                        continue;
-                    } else {
-                        if remaining_trade_size <= 0 { break; }
-                        let qty_level = {
-                            let ob = orderbook.read().await;
-                            ob.asks.entries.get(&key).map_or(0, |lvl| lvl.size)
-                        };
-                        if let Some(orders) = self.ask_orders.get_mut(&key) {
-                            let (new_fills, fill_ids) = Self::process_level(orders, qty_level, &mut remaining_trade_size, &trade);
-                            fills.extend(new_fills);
-                            // remove filled orders from by_client_id
-                            for &fill_id in &fill_ids {
-                                self.by_client_id.retain(|_, &mut v| v != fill_id);
-                            }
-                            // cleanup empty levels
-                            if orders.is_empty() {
-                                self.ask_orders.remove(&key);
-                                keys_to_remove.push(key);
-                            }
-                        }
-                    }
-                }
-                //remove key
-                for key in keys_to_remove {
-                    Self::remove_key(&mut self.ask_keys, key);
                 }
             }
         }
@@ -405,7 +409,8 @@ mod tests {
             let mut s = state.write().await;
             s.tick_size = 0.01;
         }
-    
+        // Ready signal for test to ensure task is running
+        // when orders is sent.
         let (ready_tx, ready_rx) = oneshot::channel();
         // Spawn the run task with shared state
         tokio::spawn(async move {
@@ -415,7 +420,6 @@ mod tests {
                 tokio::select! {
                     Ok(q) = order_rx.recv() => {
                         let mut s = state_clone.write().await;
-                        // s.place_or_cancel(q, &orderbook_clone).await;
                         s.replace_limit(q, &orderbook_clone).await;
                     }
                     Ok(trade) = trade_rx.recv() => {
@@ -440,7 +444,7 @@ mod tests {
             ob.asks.entries.insert(5000000, BookEntry {side: "Ask".to_string(), price: 50000.0, size: 0 });
         }
         // Place limit buy order
-        order_tx.send(Order::Limit{ symbol: "XBTUSDT".to_string(), side: Buy, price: 50000.0, size: 100, client_id: Some(1)}).unwrap();
+        order_tx.send(Order::Limit{ symbol: "XBTUSDT".to_string(), side: Sell, price: 50000.0, size: 100, client_id: Some(1)}).unwrap();
 
         tokio::time::sleep(std::time::Duration::from_millis(100)).await; // allow some time for order to be processed
         assert_eq!(state.read().await.ask_orders.len(), 1, "there should be one resting order");
@@ -453,7 +457,7 @@ mod tests {
            base: "XBT".to_string(),
            quote: "USDT".to_string(),
            tick_size: 0.01,
-           side: Sell,
+           side: Buy,
            price: 50000.0,
            size: 100,
            ts_exchange: Some(chrono::Utc::now().timestamp_micros()),
@@ -472,7 +476,7 @@ mod tests {
         // After fill, level should be removed
         {
             let s = state.read().await;
-            assert!(s.bid_orders.get(&5000000).is_none(), "order should be removed after full fill");
+            assert!(s.ask_orders.get(&5000000).is_none(), "order should be removed after full fill");
         }
     }
     #[tokio::test]
@@ -483,8 +487,8 @@ mod tests {
             let mut ob = orderbook.write().await;
             ob.asks.entries.insert(5000000, BookEntry {side: "Ask".to_string(), price: 50000.0, size: 0 });
         }
-        // Place limit buy order
-        order_tx.send(Order::Limit{ symbol: "XBTUSDT".to_string(), side: Buy, price: 50000.0, size: 100, client_id: Some(1)}).unwrap();
+        // Place limit sell order
+        order_tx.send(Order::Limit{ symbol: "XBTUSDT".to_string(), side: Sell, price: 50000.0, size: 100, client_id: Some(1)}).unwrap();
 
         tokio::time::sleep(std::time::Duration::from_millis(50)).await; // allow some time to process
 
@@ -493,7 +497,7 @@ mod tests {
            base: "XBT".to_string(),
            quote: "USDT".to_string(),
            tick_size: 0.01,
-           side: Sell,
+           side: Buy,
            price: 50000.0,
            size: 100,
            ts_exchange: Some(chrono::Utc::now().timestamp_micros()),
@@ -513,7 +517,7 @@ mod tests {
            base: "XBT".to_string(),
            quote: "USDT".to_string(),
            tick_size: 0.01,
-           side: Sell,
+           side: Buy,
            price: 50000.0,
            size: 1, 
            ts_exchange: Some(chrono::Utc::now().timestamp_micros()),
@@ -533,7 +537,7 @@ mod tests {
         // Deterministic fill: Size ahead is zero.
         {
             let mut ob = orderbook.write().await;
-            ob.asks.entries.insert(4000000, BookEntry { side: "Ask".to_string(), price: 40000.0, size: 0 });
+            ob.bids.entries.insert(4000000, BookEntry { side: "Bid".to_string(), price: 40000.0, size: 0 });
         }
 
         // Place buy order of size 50, first in que.
@@ -544,7 +548,7 @@ mod tests {
         {
             let s = state.read().await;
             let key = (40000.0 / s.tick_size) as i64;
-            let vec = s.ask_orders.get(&key).expect("order should exist");
+            let vec = s.bid_orders.get(&key).expect("order should exist");
             assert_eq!(vec[0].qty_remaining, 50);
             assert_eq!(vec[0].qty_total, 50);
             assert_eq!(vec[0].size_ahead, 0);
@@ -577,7 +581,7 @@ mod tests {
         {
             let s = state.read().await;
             let key = (40000.0 / s.tick_size) as i64;
-            let vec = s.ask_orders.get(&key).expect("orders should remain");
+            let vec = s.bid_orders.get(&key).expect("orders should remain");
             assert_eq!(vec[0].qty_remaining, 30);
             assert_eq!(vec[0].qty_total, 50);
             assert_eq!(vec[0].size_ahead, 0);
@@ -594,7 +598,7 @@ mod tests {
         {
             let s = state.read().await;
             let key = (40000.0 / s.tick_size) as i64;
-            let vec = s.ask_orders.get(&key);
+            let vec = s.bid_orders.get(&key);
             assert!(vec.is_none(), "order should be removed after full fill");
         }
     }
@@ -609,8 +613,8 @@ mod tests {
             ob.asks.entries.insert(6000000, BookEntry { side: "Ask".to_string(), price: 60000.0, size: 0 });
         }
         // Place two buy orders at same price
-        order_tx.send(Order::Limit { symbol: "XBTUSDT".into(), side: Buy, price: 60000.0, size: 30, client_id: Some(1) }).expect("order send failed");
-        order_tx.send(Order::Limit { symbol: "XBTUSDT".into(), side: Buy, price: 60000.0, size: 50, client_id: Some(2) }).expect("order send failed");
+        order_tx.send(Order::Limit { symbol: "XBTUSDT".into(), side: Sell, price: 60000.0, size: 30, client_id: Some(1) }).expect("order send failed");
+        order_tx.send(Order::Limit { symbol: "XBTUSDT".into(), side: Sell, price: 60000.0, size: 50, client_id: Some(2) }).expect("order send failed");
         tokio::time::sleep(std::time::Duration::from_millis(50)).await; // let task process 
         // Verify both orders were placed
         {
@@ -627,7 +631,7 @@ mod tests {
             base: "XBT".into(),
             quote: "USDT".into(),
             tick_size: 0.01,
-            side: Sell,
+            side: Buy,
             price: 60000.0,
             size: 40,
             ts_exchange: Some(chrono::Utc::now().timestamp_micros()),
@@ -670,7 +674,7 @@ mod tests {
         }
 
         // Place order
-        order_tx.send(Order::Limit { symbol: "XBTUSDT".into(), side: Buy, price: 70000.0, size: 5, client_id: Some(1) }).expect("order send failed");
+        order_tx.send(Order::Limit { symbol: "XBTUSDT".into(), side: Sell, price: 70000.0, size: 5, client_id: Some(1) }).expect("order send failed");
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
         // Get the order ID that was just placed
@@ -697,7 +701,7 @@ mod tests {
             base: "XBT".into(),
             quote: "USDT".into(),
             tick_size: 0.01,
-            side: Sell,
+            side: Buy,
             price: 70000.0,
             size: 5,
             ts_exchange: Some(chrono::Utc::now().timestamp_micros()),
@@ -712,6 +716,7 @@ mod tests {
         let res = tokio::time::timeout(std::time::Duration::from_millis(100), recv_fut).await;
         assert!(res.is_err(), "expected no execution event after cancel");
     }
+    #[tokio::test]
     async fn test_order_queueing() {
         //Setup test
         let (orderbook, trade_tx, order_tx, mut exec_rx, state) = setup_execution_engine().await;
@@ -721,7 +726,7 @@ mod tests {
             ob.asks.entries.insert(8000000, BookEntry { side: "Ask".to_string(), price: 80000.0, size: 180 });
         }
         // Place limit buy order
-        order_tx.send(Order::Limit { symbol: "XBTUSDT".into(), side: Buy, price: 80000.0, size: 20, client_id: Some(1) }).expect("order send failed");
+        order_tx.send(Order::Limit { symbol: "XBTUSDT".into(), side: Sell, price: 80000.0, size: 20, client_id: Some(1) }).expect("order send failed");
         tokio::time::sleep(std::time::Duration::from_millis(50)).await; // let task process
 
         // Verify order was placed with correct size_ahead
@@ -740,7 +745,7 @@ mod tests {
                 base: "XBT".into(),
                 quote: "USDT".into(),
                 tick_size: 0.01,
-                side: Sell,
+                side: Buy,
                 price: 80000.0,
                 size: 20,
                 ts_exchange: Some(chrono::Utc::now().timestamp_micros()),
@@ -766,7 +771,7 @@ mod tests {
             ob.asks.entries.insert(9000000, BookEntry { side: "Ask".to_string(), price: 90000.0, size: 100 });
         }
         // Place limit buy order
-        order_tx.send(Order::Limit { symbol: "XBTUSDT".into(), side: Buy, price: 90000.0, size: 50, client_id: Some(1)}).expect("order send failed");
+        order_tx.send(Order::Limit { symbol: "XBTUSDT".into(), side: Sell, price: 90000.0, size: 50, client_id: Some(1)}).expect("order send failed");
         tokio::time::sleep(std::time::Duration::from_millis(50)).await; // let task process
         // Verify order was placed with correct size_ahead
         {
@@ -782,8 +787,8 @@ mod tests {
            base: "XBT".to_string(),
            quote: "USDT".to_string(),
            tick_size: 0.01,
-           side: Sell,
-           price: 89999.0,
+           side: Buy,
+           price: 90001.0,
            size: 1, 
            ts_exchange: Some(chrono::Utc::now().timestamp_micros()),
            ts_received: chrono::Utc::now().timestamp_micros(),
@@ -808,7 +813,7 @@ mod tests {
                 price: 50000.0,
                 size: 0,
             });
-            ob.asks.entries.insert(5100000, BookEntry {
+            ob.asks.entries.insert(4900000, BookEntry {
                 side: "Ask".to_string(),
                 price: 51000.0,
                 size: 0,
@@ -818,7 +823,7 @@ mod tests {
         // Client places first order
         order_tx.send(Order::Limit {
             symbol: "XBTUSDT".into(),
-            side: Buy,
+            side: Sell,
             price: 50000.0,
             size: 100,
             client_id: Some(42),
@@ -838,7 +843,7 @@ mod tests {
         // Same client places replacement order at new price
         order_tx.send(Order::Limit {
             symbol: "XBTUSDT".into(),
-            side: Buy,
+            side: Sell,
             price: 51000.0,
             size: 50,
             client_id: Some(42),
@@ -873,7 +878,7 @@ mod tests {
             base: "XBT".into(),
             quote: "USDT".into(),
             tick_size: 0.01,
-            side: Sell,
+            side: Buy,
             price: 51000.0,
             size: 50,
             ts_exchange: Some(chrono::Utc::now().timestamp_micros()),
