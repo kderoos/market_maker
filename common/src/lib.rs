@@ -101,6 +101,19 @@ pub struct Candle {
     pub close: f64,
     pub volume: f64,
 }
+#[derive(Clone, Debug, Serialize)]
+pub struct MidPriceUpdate {
+    pub timestamp: i64,
+    pub ts_exchange: i64,
+    pub symbol: String,
+    pub mid_price: f64,
+}
+#[derive(Clone, Debug, Serialize)]
+pub struct VolatilityUpdate {
+    pub symbol: String,
+    pub sigma: f64,
+    pub timestamp: i64,
+}
 #[derive(Debug,Clone, Serialize)]
 pub enum AnyWsUpdate {
     Depth(DepthSnapshot),
@@ -108,6 +121,8 @@ pub enum AnyWsUpdate {
     Quote(QuoteUpdate),
     Penetration(PenetrationUpdate),
     TradeCandle(Candle),
+    MidPrice(MidPriceUpdate),
+    Volatility(VolatilityUpdate),
 }
 //Traits required by HashSet
 #[derive(Hash, Eq, PartialEq, Clone, Debug)]

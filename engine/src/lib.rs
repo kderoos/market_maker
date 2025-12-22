@@ -1,6 +1,7 @@
 pub mod book;
 mod penetration;
 mod regression;
+mod volatility;
 pub mod execution;
 
 use book::{book_engine, print_book,pub_book_depth, OrderBook};

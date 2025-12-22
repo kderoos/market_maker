@@ -11,6 +11,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 ///
 /// Parameters A and k are obtained by counting the number of trades that a delta ticks from mid_price
 /// over a recent time window, and fitting an exponential decay curve.
+/// 
+/// Stream input:
+/// A, k    Exponential fit to trade price deviations from midprice (penetration.rs).
+/// mid     Mid price, calculated from exchange quotes directly.
+/// sigma   Mid price Volatility (volatility.rs).
 ///
 ///[1] https://people.orie.cornell.edu/sfs33/LimitOrderBook.pdf
 // [2] https://arxiv.org/pdf/1105.3115
@@ -24,10 +29,12 @@ pub struct AvellanedaStrategy {
     position: i64,
     max_position: i64,
     quote_size: i64,
+    tick_size: Option<f64>,
 
     // Model params
-    sigma: f64,      // volatility estimate
+    sigma: Option<f64>, // volatility 
     gamma: f64,      // price risk aversion
+    delta: f64,      // price risk aversion
     xi: f64,         // execution risk aversion
 
     // Liquidity params (from market)
@@ -36,6 +43,8 @@ pub struct AvellanedaStrategy {
 
     // Last mid price
     mid: Option<f64>,
+    best_bid: Option<f64>,
+    best_ask: Option<f64>,
 
     symbol: String,
 }
@@ -46,19 +55,23 @@ impl AvellanedaStrategy {
         quote_size: i64,
         max_position: i64,
         gamma: f64,
-        sigma: f64,
+        delta: f64,
         xi: f64,
     ) -> Self {
         Self {
             position: 0,
             quote_size,
             max_position,
+            tick_size: None,
+            sigma: None,
             gamma,
-            sigma,
+            delta,
             xi,
             a: None,
             k: None,
             mid: None,
+            best_bid: None,
+            best_ask: None,
             symbol,
         }
     }
@@ -72,14 +85,18 @@ impl AvellanedaStrategy {
     fn half_spread_skew(&self) -> Option<(f64,f64)> {
         let A = self.a?;
         let k = self.k?;        
+        let sigma = self.sigma?;
+
         let q = self.position as f64;
-
         let gamma = self.gamma;
-        let sigma = self.sigma;
-
-        let c1 = 1.0/gamma * (1.0+gamma/k).ln();
-        let c2 = gamma/(2.0*A*k) * (1.0+gamma/k).powf(gamma/k +1.0);
-        let half_spread = c1 + (0.5*sigma*sigma +q.abs())*c2;
+        let delta = self.delta;
+        let xi = self.xi;
+        
+        // c1 = 1 / (xi * delta) * np.log(1 + xi * delta * inv_k)
+        // c2 = np.sqrt(np.divide(gamma, 2 * A * delta * k) * ((1 + xi * delta * inv_k) ** (k / (xi * delta) + 1)))
+        let c1 = 1.0/(xi* delta)  * (1.0+xi*delta/k).ln();
+        let c2 = ( gamma/(2.0*A*delta*k) * (1.0+xi*delta/k).powf(k/(xi*delta) +1.0)).sqrt();
+        let half_spread = c1 + 0.5*delta * sigma * c2;
         let skew = sigma*c2;
 
         Some((half_spread, skew))
@@ -87,16 +104,14 @@ impl AvellanedaStrategy {
     }
     fn quotes(&self) -> Option<(f64, f64)> {
         let mid = self.mid?;
-        let k = self.k?;
 
         let q = self.position as f64;
-        let xi = self.xi as f64;
 
         let (half_spread, skew) = self.half_spread_skew()?;
-
+        println!("Half spread: {}, Skew: {}, mid: {}", half_spread, skew, mid);
         // Optimal half spread
-        let bid = mid - (half_spread - skew * q);
-        let ask = mid + (half_spread + skew * q);
+        let bid = mid - (half_spread + skew * q);
+        let ask = mid + (half_spread - skew * q);
 
         Some((bid, ask))
     }
@@ -108,12 +123,22 @@ impl Strategy for AvellanedaStrategy {
 
         match update {
             AnyWsUpdate::Quote(q) => {
+                // Set tick size
+                if self.tick_size.is_none() {
+                    self.tick_size = Some(q.tick_size);
+                }
                 // Update mid price
                 match (q.best_bid, q.best_ask) {
-                    (Some(bid), Some(ask)) => self.mid = Some((bid + ask)/2.0),
+                    (Some(bid), Some(ask)) => {
+                        self.mid = Some((bid + ask)/2.0);
+                        self.best_bid = Some(bid);
+                        self.best_ask = Some(ask);
+                    },
                     //Only update if both sides are present
                     _ => {}
                 }
+                // Only post orders on quote update
+                return orders;
             }
             AnyWsUpdate::Penetration(p) => {
                 // Pull A and k from fit
@@ -121,6 +146,12 @@ impl Strategy for AvellanedaStrategy {
                     self.a = Some(a);
                     self.k = Some(k);
                 }
+            }
+            AnyWsUpdate::Volatility(v) => {
+                // Update sigma
+                self.sigma = Some(v.sigma);
+                // Only post orders on penetration update
+                // return orders;
             }
 
             _ => {}
@@ -131,6 +162,18 @@ impl Strategy for AvellanedaStrategy {
             Some(q) => q,
             None => return orders,
         };
+        // Round to tick size
+        let tick_size = self.tick_size.unwrap() else {return orders};
+        let bid = (bid / tick_size).round() * tick_size;
+        let ask = (ask / tick_size).round() * tick_size;
+
+        // Quotes should not cross best bid/ask from exchange
+        let bb = self.best_bid.unwrap() else {return orders};
+        let ba = self.best_ask.unwrap() else {return orders};
+        let bid = bid.max(bb);
+        let ask = ask.min(ba);
+
+
 
         // Inventory-aware quoting
         if self.position < self.max_position {
@@ -174,7 +217,7 @@ mod tests {
             10,
             100,
             0.1,
-            0.2,
+            0.1,
             0.1,
         );
 
@@ -210,7 +253,13 @@ mod tests {
             best_bid: Some(100.0),
             best_ask: Some(102.0),
         }));
-
+        // Set sigma
+        strat. on_market(&AnyWsUpdate::Volatility(common::VolatilityUpdate {
+            symbol: "XBTUSDT".into(),
+            sigma: 0.5,
+            timestamp: 0,
+        }));
+        // Set liquidity params
         let orders = strat.on_market(&AnyWsUpdate::Penetration(PenetrationUpdate {
             timestamp: 0,
             symbol: "XBTUSDT".into(),
@@ -218,7 +267,7 @@ mod tests {
             fit_A: Some(10.0),
             fit_k: Some(1.5),
         }));
-
+    
         assert_eq!(orders.len(), 2);
 
         let bid = orders.iter().find(|o| matches!(o, Order::Limit { side: OrderSide::Buy, .. })).unwrap();
@@ -228,30 +277,65 @@ mod tests {
             let mid = 101.0;
             assert!(*bid_p < mid);
             assert!(*ask_p > mid);
+            assert!((ask_p - mid) - (mid - bid_p) < 0.001, "spreads should be symmetric");
         }
     }
+
     #[test]
     fn inventory_skews_quotes() {
         let mut strat = AvellanedaStrategy::new(
             "XBTUSDT".into(),
-            10,
-            100,
-            0.1,
-            0.2,
-            0.1,
+            10, //quote size
+            100,//max position
+            0.1,//gamma
+            1.0,//delta
+            0.1,//xi
         );
 
-        strat.a = Some(10.0);
+        strat.a = Some(100.0);
         strat.k = Some(1.5);
         strat.mid = Some(100.0);
+        strat.sigma = Some(1.0);
 
-        strat.position = 50; // long
+        strat.position = 5; // long
 
         let (bid, ask) = strat.quotes().unwrap();
-
-        assert!(bid < 100.0, "long inventory should push bid down");
-        assert!(ask > 100.0, "long inventory should push ask up");
+        println!("Bid: {}, Ask: {}", bid, ask);
+        assert!(bid < 100.0, "test sanity check");
+        assert!(ask > 100.0, "test sanity check");
+        assert!(((ask - 100.0) < (100.0 - bid)) , "bid should be further from mid than ask for long inventory");
+    
+        strat.position = -5; // short 
+        let (bid2, ask2) = strat.quotes().unwrap();
+        println!("Bid: {}, Ask: {}", bid2, ask2);
+        assert!(bid2 < 100.0, "test sanity check");
+        assert!(ask2 > 100.0, "test sanity check");
+        assert!(((ask2 - 100.0) > (100.0 - bid2)) , "ask should be further from mid than bid for short inventory");
     }
+    #[test]
+    fn inventory_moves_reservation_price() {
+        let mut strat = AvellanedaStrategy::new(
+            "XBTUSDT".into(),
+            10, //quote size
+            100,//max position
+            0.1,//gamma
+            1.0,//delta
+            0.1,//xi
+        );
+
+        strat.a = Some(100.0);
+        strat.k = Some(1.5);
+        strat.mid = Some(100.0);
+        strat.sigma = Some(1.0);
+
+        strat.position = 10;
+        let (bid1, ask1) = strat.quotes().unwrap();
+        strat.position = 20;
+        let (bid2, ask2) = strat.quotes().unwrap();
+        assert!(bid2 < bid1);
+        assert!(ask2 < ask1);
+    }
+
     #[test]
     fn max_position_blocks_side() {
         let mut strat = AvellanedaStrategy::new(
