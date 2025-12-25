@@ -24,19 +24,28 @@ impl Engine {
         let (tx_exchange, rx_exchange) = broadcast::channel(1000);
         let (tx_cmd, _) = broadcast::channel(100);
         let (tx_ws, _) = broadcast::channel(1000);
+        let (tx_mid_price, _) = broadcast::channel(1000);
 
         let book_state = Arc::new(RwLock::new(OrderBook::default()));
         
         // Spawn engine tasks
         let book_state_clone = book_state.clone();
         tokio::spawn(book_engine(rx_exchange, book_state_clone));
-        tokio::spawn(pub_book_depth(tx_ws.clone(), book_state.clone()));
-        // tokio::spawn(penetration::midprice_sampler(
-        //     tx_exchange.clone(), // Mid-price sampler sends to engine instead of ws.
-        //     book_state.clone(),
-        //     1000,
-        //     "XBTUSDT".to_string(),
-        // ));
+        // Spawn mid_price publisher and volatility engine
+        let book_state_clone = book_state.clone();
+        tokio::spawn(volatility::mid_price_sampler(
+            tx_mid_price.clone(),
+            book_state_clone,
+            1000, //interval_ms
+        ));
+        tokio::spawn(volatility::engine(
+            tx_mid_price.subscribe(),
+            tx_ws.clone(),
+            60,    //window_len
+            1000,  //sample_interval_ms
+        ));
+
+        // Spawn penetration analyzer
         let rx_penetration = tx_exchange.subscribe(); 
         tokio::spawn(penetration::engine(
             rx_penetration,
@@ -46,6 +55,11 @@ impl Engine {
             500, //num_bins
             500, //interval_ms
             "XBTUSDT".to_string(),
+        ));
+
+        // spawn execution engine
+        tokio::spawn(execution::run(
+            
         ));
 
         // Spawn connectors

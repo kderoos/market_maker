@@ -358,7 +358,7 @@ impl ExecutionState {
 }
 
 pub async fn run(orderbook: Arc<RwLock<OrderBook>>,
-                 mut trade_rx: Receiver<TradeUpdate>,
+                 mut trade_rx: Receiver<AnyWsUpdate>,
                  mut order_rx: Receiver<Order>,
                  exec_tx: Sender<ExecutionEvent>) {
     let mut state = ExecutionState::Default();
@@ -366,14 +366,17 @@ pub async fn run(orderbook: Arc<RwLock<OrderBook>>,
     loop {
         tokio::select! {
             Ok(q) = order_rx.recv() => {
-                // state.place_or_cancel(q, &orderbook).await;
                 state.replace_limit(q,&orderbook).await;
             }
 
-            Ok(trade) = trade_rx.recv() => {
-                let fills = state.on_trade(trade, &orderbook).await;
-                for fill in fills {
-                    exec_tx.send(fill).unwrap();
+            Ok(update) = trade_rx.recv() => {
+                match update {
+                    AnyWsUpdate::Trade(trade) => {
+                        let fills = state.on_trade(trade, &orderbook).await;
+                        for fill in fills {
+                            exec_tx.send(fill).unwrap();
+                        }                       
+                    }
                 }
             }
         }
