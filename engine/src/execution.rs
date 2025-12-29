@@ -1,9 +1,9 @@
 use std::collections::{HashMap, hash_map::Entry};
-use std::sync::Arc;
+use std::sync::{Arc};
+use tokio::sync::RwLock;
 use std::sync::atomic::{AtomicI64, Ordering};
 use tokio::sync::broadcast::{Sender, Receiver};
-use tokio::sync::RwLock;
-use common::{BookEntry, TradeUpdate, Order, OrderSide, ExecutionEvent};
+use common::{BookEntry, TradeUpdate, Order, OrderSide, AnyWsUpdate, ExecutionEvent};
 use common::OrderSide::{Buy, Sell};
 use crate::book::OrderBook;
 use rand;
@@ -374,9 +374,11 @@ pub async fn run(orderbook: Arc<RwLock<OrderBook>>,
                     AnyWsUpdate::Trade(trade) => {
                         let fills = state.on_trade(trade, &orderbook).await;
                         for fill in fills {
+                            println!("Sent execution event: {:?}", fill.clone());
                             exec_tx.send(fill).unwrap();
                         }                       
                     }
+                    _ => {}
                 }
             }
         }

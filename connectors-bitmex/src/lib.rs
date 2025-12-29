@@ -137,11 +137,11 @@ impl BitmexConnector {
             Ok(msg) => {
                 if msg.is_text() {
                     let text = msg.into_text().unwrap();
-                     println!("Raw WS message: {}", text);
+                    //  println!("Raw WS message: {}", text);
                 
                     // Parse trade messages
                     if text.contains("\"table\":\"trade\"") {
-                        println!("Parsing trade message: {}", text);
+                        // println!("Parsing trade message: {}", text);
                         match serde_json::from_str::<BitmexTradeMsg>(&text) {
                             Ok(msg) => {
                                 if msg.table == "trade" && msg.action == "insert" {

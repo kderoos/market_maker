@@ -1,5 +1,5 @@
-use std::sync::{Arc, RwLock};
-use tokio::sync::broadcast;
+use std::sync::{Arc};
+use tokio::sync::{broadcast,RwLock};
 use common::{AnyUpdate, BookEntry,BookUpdate};
 use std::collections::{HashMap}; 
 
@@ -31,7 +31,7 @@ impl OrderBook {
             .copied();
 
         match (best_bid_tick, best_ask_tick) {
-            (Some(bid), Some(ask)) => Some((bid + ask).wrapping_sub(2) as u64),
+            (Some(bid), Some(ask)) => Some((bid + ask).wrapping_div(2) as u64),
             _ => None,
         }
     } 
@@ -49,7 +49,7 @@ pub async fn update_book_state(book_update: BookUpdate, book_state: Arc<RwLock<O
         // println!("Book update received: action: {}, entries: {}", book_update.action, book_update.data.len());
         // Process BookUpdate messages
         {
-            let mut state = book_state.write().unwrap();
+            let mut state = book_state.write().await;
             // Update the order book state based on the action
             match book_update.action.as_str() {
                 "insert" => {
@@ -95,7 +95,7 @@ pub async fn pub_book_depth(tx_ws: broadcast::Sender<common::AnyWsUpdate>, book_
     loop {
         {
             let len = 100;
-            let state = book_state.read().unwrap();
+            let state = book_state.read().await;
 
             let top_cum_bids = top_n_with_padding(&state.bids.entries, len, true)
                 .iter()
@@ -148,7 +148,7 @@ pub async fn book_engine(mut rx: broadcast::Receiver<AnyUpdate>, book_state: Arc
     while let Ok(update) = rx.recv().await {
         if let AnyUpdate::BookUpdate(book_update) = update {
             update_book_state(book_update, book_state.clone()).await;
-            let state = book_state.read().unwrap();
+            let state = book_state.read().await;
             let best_bid = top_n_with_padding(&state.bids.entries,1,true);
             }
     }
@@ -159,7 +159,7 @@ pub async fn print_book(book_state: Arc<RwLock<OrderBook>>) {
     loop {
         let start= std::time::Instant::now();
         { //HashMap book print
-            let state = book_state.read().unwrap();
+            let state = book_state.read().await;
             println!("Order Book Snapshot:");
 
             // Asks: sort ascending by price
@@ -233,7 +233,7 @@ mod tests {
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await; // wait for processing
 
         {
-            let state = book_state.read().unwrap();
+            let state = book_state.read().await;
             assert_eq!(state.bids.entries.len(), 2);
             assert_eq!(state.asks.entries.len(), 1);
             assert_eq!(state.bids.entries.get(&10000).unwrap().size, 10);
@@ -256,7 +256,7 @@ mod tests {
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await; // wait for processing
 
         {
-            let state = book_state.read().unwrap();
+            let state = book_state.read().await;
             assert_eq!(state.bids.entries.len(), 1);
             assert!(state.bids.entries.get(&10000).is_none());
             assert_eq!(state.bids.entries.get(&9950).unwrap().size, 5);

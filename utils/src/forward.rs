@@ -1,7 +1,7 @@
 use tokio::sync::broadcast;
 use common::{AnyUpdate, AnyWsUpdate};
 
-pub async fn ws_forwarder(
+pub async fn ws_forward_trade_quote(
     mut rx: broadcast::Receiver<AnyUpdate>,
     tx_ws: broadcast::Sender<AnyWsUpdate>,
 ) {

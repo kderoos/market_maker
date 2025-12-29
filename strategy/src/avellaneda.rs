@@ -108,7 +108,7 @@ impl AvellanedaStrategy {
         let q = self.position as f64;
 
         let (half_spread, skew) = self.half_spread_skew()?;
-        println!("Half spread: {}, Skew: {}, mid: {}", half_spread, skew, mid);
+        // println!("Half spread: {}, Skew: {}, mid: {}", half_spread, skew, mid);
         // Optimal half spread
         let bid = mid - (half_spread + skew * q);
         let ask = mid + (half_spread - skew * q);
@@ -151,7 +151,7 @@ impl Strategy for AvellanedaStrategy {
                 // Update sigma
                 self.sigma = Some(v.sigma);
                 // Only post orders on penetration update
-                // return orders;
+                return orders;
             }
 
             _ => {}
@@ -194,6 +194,12 @@ impl Strategy for AvellanedaStrategy {
                 client_id: Some(ASK_ID),
             });            
         }
+        // Debug
+        // println!(
+        //     "Avellaneda Strategy Quotes - Position: {}, Bid: {}, Ask: {}",
+        //     self.position, bid, ask
+        // );
+
         orders
     }
 

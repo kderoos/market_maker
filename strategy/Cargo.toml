@@ -5,7 +5,6 @@ edition = "2024"
 
 [dependencies]
 utils = { version = "0.1.0", path = "../utils" }
-engine = { version = "0.1.0", path = "../engine" }
 common = { version = "0.1.0", path = "../common" }
 ta = "0.5.0"
 tokio = { version = "1", features = ["full"] }

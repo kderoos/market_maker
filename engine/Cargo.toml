@@ -7,6 +7,8 @@ edition = "2024"
 connectors-bitmex = { path = "../connectors-bitmex" }
 connectors-bitvavo = { path = "../connectors-bitvavo" }
 common = { version = "0.1.0", path = "../common" }
+utils = { version = "0.1.0", path = "../utils/"}
+strategy = { version = "0.1.0", path = "../strategy/"}
 tokio = { version = "1", features = ["full"] }
 async-trait = "0.1.89"
 console-subscriber = "0.4.1"

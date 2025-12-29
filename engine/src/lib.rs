@@ -7,11 +7,13 @@ pub mod execution;
 use book::{book_engine, print_book,pub_book_depth, OrderBook};
 
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
-use tokio::sync::broadcast;
+use std::sync::{Arc};
+use tokio::sync::{RwLock,broadcast};
 use common::{Connector, AnyWsUpdate, ChannelType, ConnectorCommand};
 use connectors_bitmex::BitmexConnector;
 use connectors_bitvavo::BitvavoConnector;
+use utils::forward::ws_forward_trade_quote;
+use strategy::{runner::run_strategy, avellaneda::AvellanedaStrategy};
 
 pub struct Engine {
     tx_cmd: broadcast::Sender<ConnectorCommand>,
@@ -33,16 +35,18 @@ impl Engine {
         tokio::spawn(book_engine(rx_exchange, book_state_clone));
         // Spawn mid_price publisher and volatility engine
         let book_state_clone = book_state.clone();
-        tokio::spawn(volatility::mid_price_sampler(
+        tokio::spawn(volatility::midprice_sampler(
             tx_mid_price.clone(),
             book_state_clone,
             1000, //interval_ms
+            "XBTUSDT".to_string(),
         ));
-        tokio::spawn(volatility::engine(
+        tokio::spawn(volatility::volatility_engine(
             tx_mid_price.subscribe(),
             tx_ws.clone(),
             60,    //window_len
-            1000,  //sample_interval_ms
+            1000.0,  //sample_interval_ms
+            "XBTUSDT".to_string(),
         ));
 
         // Spawn penetration analyzer
@@ -56,10 +60,22 @@ impl Engine {
             500, //interval_ms
             "XBTUSDT".to_string(),
         ));
+        // Forward trade, quote from rx_exchange to tx_ws
+        tokio::spawn(ws_forward_trade_quote(
+            tx_exchange.subscribe(),
+            tx_ws.clone(),
+        ));
+        
 
         // spawn execution engine
+        let (tx_exec, _) = broadcast::channel(100);
+        let (tx_order,_) = broadcast::channel(100);
+        let book_state_exec = book_state.clone();
         tokio::spawn(execution::run(
-            
+            book_state_exec,
+            tx_ws.subscribe(), // Receiver <AnyWsUpdate>
+            tx_order.subscribe(), //Receiver <Order>
+            tx_exec.clone(), // Sender <ExecutionEvent>
         ));
 
         // Spawn connectors
@@ -70,6 +86,21 @@ impl Engine {
             bitmex.run(tx_bitmex_updates, rx_bitmex_cmd).await;
         });
 
+        // Avellaneda strategy
+        let mut strategy = AvellanedaStrategy::new(
+            "XBTUSDT".to_string(),
+            10,    // quote size
+            100,   // max position
+            0.1,   // gamma
+            0.2,   // delta
+            0.1,   // xi
+        );
+        tokio::spawn(run_strategy(strategy,
+                tx_ws.subscribe(), //Receiver <AnyWsUpdate>
+                tx_exec.subscribe(), // Receiver <ExecutionEvent>
+                tx_order, // Sender <Order>
+                )
+        );
         Engine {
             tx_cmd,
             tx_ws,

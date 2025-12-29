@@ -1,64 +1,11 @@
 use std::collections::VecDeque;
-use std::sync::{Arc, RwLock};
-use tokio::sync::broadcast::{Sender, Receiver};
+use std::sync::{Arc};
+use tokio::sync::{RwLock,broadcast::{Sender, Receiver}};
 use std::time::{SystemTime, UNIX_EPOCH};
 use crate::book::OrderBook;
 use nalgebra::{DMatrix, DVector};
 use crate::regression::{SimpleSLR, RegressionEngine};
 use common::{AnyUpdate,TradeUpdate, PenetrationUpdate, AnyWsUpdate};
-
-#[derive(Clone, Debug)]
-pub struct MidPrice {
-    pub timestamp: i64,
-    pub ts_exchange: i64,
-    pub symbol: String,
-    pub mid_price: f64,
-}
-
-pub async fn midprice_sampler(
-    tx: Sender<AnyUpdate>, 
-    book_state: Arc<RwLock<OrderBook>>, 
-    interval_ms: u64,
-    symbol: String
-) {
-    let interval = tokio::time::Duration::from_millis(interval_ms);
-    loop {
-        {
-            let state = book_state.read().unwrap();
-
-            let best_bid = state
-                .bids
-                .entries
-                .values()
-                .max_by(|a, b| a.price.partial_cmp(&b.price).unwrap());
-
-            let best_ask = state
-                .asks
-                .entries
-                .values()
-                .min_by(|a, b| a.price.partial_cmp(&b.price).unwrap());
-
-            if let (Some(bid), Some(ask)) = (best_bid, best_ask) {
-                let mid = (bid.price + ask.price) / 2.0;
-                let now = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap()
-                    .as_micros() as i64;
-                let mp = MidPrice {
-                    timestamp: now,
-                    ts_exchange: state.timestamp,
-                    symbol: symbol.clone(),
-                    mid_price: mid,
-                };
-                // let _ = tx.send(AnyUpdate(mp));
-                panic!("MidPrice sampler not yet implemented");
-                // println!("MidPrice sampler: {:?}", mp);
-            }
-        }
-
-        tokio::time::sleep(interval).await;
-    }
-}
 
 // Counts[i] is the number of trades crossed at least i price levels.
 // pub type Counts = Vec<u64>; 
@@ -146,7 +93,6 @@ impl TradePricedeltaHist {
         } else {
             self.midprice_tick - trade_tick
         };
-        println!("Recording trade at {} with price {}, midprice tick {}, delta ticks {}", trade.ts_received, trade.price, self.midprice_tick, price_delta_ticks);
         self.record(price_delta_ticks as u32);
     }
     pub fn collect_and_reset(&mut self, new_midprice_tick: u64) -> TradePricedeltaHist {
@@ -243,7 +189,7 @@ pub async fn engine(
             // Each interval, fetch midprice and rotate aggregator
             _ = ticker.tick() => {
                     let mid_price_tick = {
-                        let state = book_state.read().unwrap();
+                        let state = book_state.read().await;
                         state.get_midprice_tick()
                     };
                     // Handle empty orderbook
@@ -254,12 +200,12 @@ pub async fn engine(
                             _ = aggregator.rotate_aggregate(last.clone());
                             let (A,k) = match aggregator.fit_exponential(){
                                 Err(e) => {
-                                    eprintln!("Penetration depth regression fit error: {}", e);
-                                    eprintln!("Aggregated counts: {:?}", aggregator.aggregated_counts.clone().as_vec());
+                                    // eprintln!("Penetration depth regression fit error: {}", e);
+                                    // eprintln!("Aggregated counts: {:?}", aggregator.aggregated_counts.clone().as_vec());
                                     continue;
                                 }
                                 Ok((A,k)) => { 
-                                    println!("Penetration fit results: A = {}, k = {}", A, k);
+                                    // println!("Penetration fit results: A = {}, k = {}", A, k);
                                     (A,k)
                                 }
                             };

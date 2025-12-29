@@ -8,16 +8,16 @@ use tokio;
 use common::{AnyWsUpdate, TradeUpdate, Order, OrderSide, ExecutionEvent};
 use common::OrderSide::{Buy, Sell};
 
-// crates in the workspace
 use strategy::momentum::MomentumStrategy;
 use strategy::runner::run_strategy;
 use utils::candle_service::CandleService;
-use engine::execution::run as run_execution; // adjust crate name/path if different
-use engine::book::OrderBook; // adjust if OrderBook is in different crate
+use engine::execution::run as run_execution; 
+use engine::book::OrderBook; 
 use tokio::sync::RwLock;
 
 #[tokio::test]
 async fn test_momentum_with_sinusoidal_trades() {
+    assert!(false);
     // Channels: market updates, engine trades, orders, exec events
     let (tx_market, _) = broadcast::channel::<AnyWsUpdate>(256);
     let (tx_trade, _) = broadcast::channel::<TradeUpdate>(256);
@@ -99,7 +99,6 @@ async fn test_momentum_with_sinusoidal_trades() {
             tick_size: 0.01,
             base: "BTC".to_string(),
             quote: "USDT".to_string(),
-            // some versions of TradeUpdate have `symbol`; if so set it too:
             // symbol: "BTCUSDT".to_string(),
             side: if i % 2 == 0 { Buy } else { Sell },
             price,
