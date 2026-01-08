@@ -2,6 +2,7 @@ pub mod book;
 mod penetration;
 mod regression;
 mod volatility;
+mod position;
 pub mod execution;
 
 use book::{book_engine, print_book,pub_book_depth, OrderBook};
@@ -14,6 +15,7 @@ use connectors_bitmex::BitmexConnector;
 use connectors_bitvavo::BitvavoConnector;
 use utils::forward::ws_forward_trade_quote;
 use strategy::{runner::run_strategy, avellaneda::AvellanedaStrategy};
+use position::run_position_engine;
 
 pub struct Engine {
     tx_cmd: broadcast::Sender<ConnectorCommand>,
@@ -89,7 +91,7 @@ impl Engine {
         // Avellaneda strategy
         let mut strategy = AvellanedaStrategy::new(
             "XBTUSDT".to_string(),
-            10,    // quote size
+            1,    // quote size
             100,   // max position
             0.1,   // gamma
             0.2,   // delta
@@ -101,6 +103,12 @@ impl Engine {
                 tx_order, // Sender <Order>
                 )
         );
+
+        tokio::spawn(run_position_engine(
+            tx_exec.subscribe(),
+            // tx_position,
+        ));
+
         Engine {
             tx_cmd,
             tx_ws,
