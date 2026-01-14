@@ -117,7 +117,7 @@ impl BitmexConnector {
                 write.send(Message::Text(msg.into())).await.unwrap();
                 write.close().await.unwrap();
             }
-
+            _ => {}
         }
     
         for sub in self.subscriptions.iter() {

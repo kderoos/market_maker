@@ -1,17 +1,18 @@
 use std::fs::File;
+use std::path::Path;
 use flate2::read::GzDecoder;
 use csv;
 use serde::de::DeserializeOwned;
 use anyhow::Result;
 
 use crate::cursor::event::DomainEvent;
-
+use crate::cursor::merge::EventCursor;
 /// Row -> DomainEvent converter each row type implements
 pub trait DomainEventRow {
     fn into_domain_event(self, seq: u64) -> DomainEvent;
 }
 
-/// Generic CSV cursor for gzipped CSV files where each row type T implements Deserialize + DomainEventRow
+/// Generic CSV cursor for gzipped Tardis CSV files 
 pub struct CsvCursor<T> {
     iter: csv::DeserializeRecordsIntoIter<GzDecoder<File>, T>,
     next: Option<DomainEvent>,
@@ -20,9 +21,13 @@ pub struct CsvCursor<T> {
 
 impl<T> CsvCursor<T>
 where
-    T: DeserializeOwned + DomainEventRow,
+    T: DeserializeOwned + DomainEventRow ,
 {
-    pub fn open(path: &str) -> Result<Self> {
+    pub fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
+        Self::open(path)
+    }
+    pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
+    // pub fn open(path: &str) -> Result<Self> {
         let file = File::open(path)?;
         let decoder = GzDecoder::new(file);
         let iter = csv::ReaderBuilder::new()
@@ -54,9 +59,23 @@ where
     pub fn take_next(&mut self) -> Option<DomainEvent> {
         let out = self.next.take();
         if out.is_some() {
-            // best-effort: ignore read_next error here or propagate as you prefer
+            // propagate error later.
             let _ = self.read_next();
         }
         out
+    }
+}
+impl<T> EventCursor for CsvCursor<T>
+where
+    T: DeserializeOwned + DomainEventRow + Send + Sync,
+{
+    /// peek at the current preloaded DomainEvent (if any) without advancing
+    fn peek(&self) -> Option<&DomainEvent> {
+        self.next.as_ref()
+    }
+    /// advance to next DomainEvent
+    fn advance(&mut self) {
+        //consume current event and preload next
+        let _ = self.take_next();
     }
 }

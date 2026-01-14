@@ -4,3 +4,11 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+anyhow = "1.0.100"
+async-trait = "0.1.89"
+common = { version = "0.1.0", path = "../common" }
+csv = "1.4.0"
+flate2 = "1.1.5"
+serde = "1.0.228"
+tempfile = "3.24.0"
+tokio = { version = "1.49.0", features = ["full"]}

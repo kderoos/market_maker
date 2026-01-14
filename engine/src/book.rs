@@ -149,7 +149,7 @@ pub async fn book_engine(mut rx: broadcast::Receiver<AnyUpdate>, book_state: Arc
         if let AnyUpdate::BookUpdate(book_update) = update {
             update_book_state(book_update, book_state.clone()).await;
             let state = book_state.read().await;
-            let best_bid = top_n_with_padding(&state.bids.entries,1,true);
+            // let best_bid = top_n_with_padding(&state.bids.entries,1,true);
             }
     }
 }

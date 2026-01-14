@@ -5,7 +5,15 @@ use serde::{Serialize, Deserialize};
 use async_trait::async_trait;
 // use tokio::sync::mpsc::Sender;
 use tokio::sync::broadcast::{Sender, Receiver};
+use std::path::PathBuf;
 
+#[derive(Debug, Clone)]
+pub struct TardisPaths {
+    pub trades: PathBuf,
+    pub quotes: Option<PathBuf>,
+    pub book: Option<PathBuf>,
+}
+ 
 #[derive(Debug)]
 pub struct InstrumentData {
     pub symbol: String,
@@ -136,6 +144,7 @@ pub enum ConnectorCommand {
     Subscribe{ channel: ChannelType, symbol: String },
     Unsubscribe{ channel: ChannelType, symbol: String },
     ResubscribeAll,
+    ReplayStop,
     Shutdown,
 }
 #[async_trait]

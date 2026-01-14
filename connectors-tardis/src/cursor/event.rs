@@ -1,6 +1,7 @@
+use common::AnyUpdate;
 #[repr(u8)]
-#[derive(Copy, Clone, Eq, PartialEq)]
 // Set order of events with equal ts
+#[derive(Debug,Copy, Clone, Eq, PartialEq)]
 pub enum EventClass {
     Book  = 0,
     Quote = 1,
@@ -8,18 +9,15 @@ pub enum EventClass {
 }
 
 // Expose the fields for chronological ordering
+#[derive(Clone, Debug)]
 pub struct DomainEvent {
     pub local_ts: i64,
-    pub exchange_ts: i64,
+    pub exchange_ts: Option<i64>,
     pub class: EventClass,
-    // sequence number in OG datafile.
+    // sequence number in datafile.
     pub seq: u64,
-    pub payload: DomainPayload,
+    pub payload: AnyUpdate,
 }
 
-pub enum DomainPayload {
-    Trade(Trade),
-    Quote(Quote),
-    Book(BookEvent),
-}
+
 
