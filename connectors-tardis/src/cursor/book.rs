@@ -1,5 +1,5 @@
 use serde::Deserialize;
-use anyhow::Result;
+use crate::error::TardisError;
 use common::{AnyUpdate,BookUpdate,BookEntry, OrderSide};
 use std::path::Path;
 
@@ -62,7 +62,7 @@ pub struct BookCursor {
     next_event: Option<DomainEvent>,
 }
 impl BookCursor {
-    pub fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
+    pub fn new<P: AsRef<Path>>(path: P) -> Result<Self, TardisError> {
         let mut inner = CsvCursor::open(path)?;
         let mut cursor = Self {
             last_was_partial: false,
@@ -72,30 +72,33 @@ impl BookCursor {
         cursor.preload_next()?;
         Ok(cursor)
     }
-    fn preload_next(&mut self) -> Result<()> {
+    fn preload_next(&mut self) -> Result<(),TardisError> {
         // take next event from inner cursor
-        if let Some(mut row_event) = self.inner.take_next() {
-            let row_is_partial = match &row_event.payload {
-                AnyUpdate::BookUpdate(u) => u.action == "Partial",
-                _ => false,
-            };
-            // check for snapshot event and modify action
-            if row_is_partial && !self.last_was_partial {
-                // mark first snapshot row as Partial
-                if let AnyUpdate::BookUpdate(ref mut u) = row_event.payload {
-                    u.action = "Partial".to_string();
+        match self.inner.take_next()? {
+            Some(mut row_event) => {
+                let row_is_partial = match &row_event.payload {
+                    AnyUpdate::BookUpdate(u) => u.action == "Partial",
+                    _ => false,
+                };
+                // check for snapshot event and modify action
+                if row_is_partial && !self.last_was_partial {
+                    // mark first snapshot row as Partial
+                    if let AnyUpdate::BookUpdate(ref mut u) = row_event.payload {
+                        u.action = "Partial".to_string();
+                    }
+                } else if row_is_partial && self.last_was_partial {
+                    // Partial already sent. Mark action "Update"
+                    // to avoid clearing book again
+                    if let AnyUpdate::BookUpdate(ref mut u) = row_event.payload {
+                        u.action = "Update".to_string();
+                    }
                 }
-            } else if row_is_partial && self.last_was_partial {
-                // Partial already sent. Mark action "Update"
-                // to avoid clearing book again
-                if let AnyUpdate::BookUpdate(ref mut u) = row_event.payload {
-                    u.action = "Update".to_string();
-                }
+                self.last_was_partial = row_is_partial;
+                self.next_event = Some(row_event);
             }
-            self.last_was_partial = row_is_partial;
-            self.next_event = Some(row_event);
-        } else {
-            self.next_event = None;
+            None => {
+                self.next_event = None;
+            }
         }
         Ok(())
     }
@@ -104,9 +107,10 @@ impl EventCursor for BookCursor {
     fn peek(&self) -> Option<&DomainEvent> {
         self.next_event.as_ref()
     }
-    fn advance(&mut self) {
+    fn advance(&mut self) -> Result<(), TardisError> {
         // move to next row and apply snapshot logic preemptively
-        let _ = self.preload_next();
+        self.preload_next()?;
+        Ok(())
     }
 }
 #[cfg(test)]

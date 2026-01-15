@@ -3,14 +3,16 @@ use crate::cursor::merge::{MergeCursor,EventCursor};
 use async_trait::async_trait;
 use common::{AnyUpdate, Connector, ConnectorCommand, TardisPaths};
 use tokio::sync::broadcast::{Receiver, Sender};
-use crate::cursor::{trade::TradeCursor,quote::QuoteCursor,book::BookCursor};
-use anyhow::Result;
+use crate::cursor::{generic::CsvCursor,trade::TradeCursor,quote::QuoteCursor,book::BookCursor};
+use crate::error::TardisError;
+use tracing;
+
 
 pub struct TardisConnector {
     cursor: MergeCursor,
 }
 impl TardisConnector {
-    pub fn new(paths: TardisPaths) -> Result<Self> {
+    pub fn new(paths: TardisPaths) -> Result<Self, TardisError> {
         let TardisPaths { trades, quotes, book } = paths;
 
         let mut cursors: Vec<Box<dyn EventCursor>> = Vec::new();
@@ -42,16 +44,21 @@ impl Connector for TardisConnector {
     ) {
         loop {
             // handle control commands first
-            if let Ok(cmd) = rx.try_recv() {
-                match cmd {
-                    ConnectorCommand::ReplayStop => break,
-                    _ => {}
+            match rx.try_recv() {
+                    Ok(ConnectorCommand::ReplayStop) => break,
+                    Ok(_) => {},
+                    Err(tokio::sync::broadcast::error::TryRecvError::Empty) => {}
+                    Err(tokio::sync::broadcast::error::TryRecvError::Closed) => break, 
+                    Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => todo!(),
                 }
-            }
 
             let event = match self.cursor.next() {
-                Some(e) => e,
-                None => break, // EOF
+                Ok(Some(e)) => e,  // event
+                Ok(None) => break, // EOF
+                Err(e) => {
+                    tracing::error!("TardisConnector cursor error: {:#?}", e);
+                    break;
+                }
             };
 
             // emit update
@@ -146,5 +153,68 @@ binance,BTCUSDT,1000,1000,99.5,1,100.5,1
             _ => panic!("expected Book Update"),
         }
     }
+    #[tokio::test]
+    async fn tardis_connector_handles_missing_optional_files() {
+        let trade_csv = r#"
+exchange,symbol,timestamp,local_timestamp,id,side,price,amount
+binance,BTCUSDT,1000,1000,silly-id,buy,100.5,1
+"#;
+        let paths = TardisPaths {
+            trades: write_gz_csv("trades.csv.gz", trade_csv),
+            book: None,
+            quotes: None,
+        };
+
+        let mut connector = TardisConnector::new(paths).unwrap();
+
+        let (tx_updates, mut rx_updates) = broadcast::channel(16);
+        let (_tx_cmd, rx_cmd) = broadcast::channel(4);
+
+        connector.run(tx_updates, rx_cmd).await;
+
+        let mut updates = Vec::new();
+        while let Ok(u) = rx_updates.try_recv() {
+            updates.push(u);
+        }
+
+        // ---- we expect only 1 update (the trade)
+        assert_eq!(updates.len(), 1);
+
+        match &updates[0] {
+            AnyUpdate::TradeUpdate(_) => {}
+            _ => panic!("expected Trade"),
+        }
+    }
+    async fn tardis_connector_error_on_path_not_found() {
+        let paths = TardisPaths {
+            trades: std::path::PathBuf::from("non_existent_trades.csv.gz"),
+            book: None,
+            quotes: None,
+        };
+
+        let result = TardisConnector::new(paths);
+        assert!(result.is_err(), "expected error on missing trades file");
+    }
+    use crate::cursor::book::BookRow;
+    use crate::error::TardisError;
+    #[test]
+    fn csv_parse_error_on_open_reports_file_and_row() {
+        let csv = r#"
+    exchange,symbol,timestamp,local_timestamp,is_snapshot,side,price,amount
+    binance,BTCUSDT,1000,1001,true,bid,100.0,NOT_A_NUMBER
+    "#;
+
+        let path = write_gz_csv("bad.csv.gz", csv);
+
+        let err = match CsvCursor::<BookRow>::open(&path) {
+            Err(TardisError::CsvParse { path: p, row, .. }) => {
+                assert!(p.ends_with("bad.csv.gz"));
+                assert_eq!(row, 0); // seq before increment
+            }
+            _ => panic!("unexpected error type"),
+        };
+    }
+
 }
+
 

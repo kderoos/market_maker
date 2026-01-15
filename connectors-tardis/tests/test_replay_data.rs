@@ -18,7 +18,7 @@ fn replay_tardis_trades_csv_gz() {
     let mut last_ts = None;
     let mut count = 0;
 
-    while let Some(DomainEvent { local_ts, payload, .. }) = merge.next() {
+    while let Ok(Some(DomainEvent { local_ts, payload, .. })) = merge.next() {
         // monotonic local timestamp
         if let Some(prev) = last_ts {
             assert!(
@@ -64,7 +64,7 @@ fn replay_tardis_quotes_csv_gz() {
     let mut last_ts = None;
     let mut count = 0;
 
-    while let Some(DomainEvent { local_ts, payload, .. }) = merge.next() {
+    while let Ok(Some(DomainEvent { local_ts, payload, .. })) = merge.next() {
         // monotonic local timestamp
         if let Some(prev) = last_ts {
             assert!(
@@ -109,7 +109,7 @@ fn replay_book() {
      let mut last_ts = None;
      let mut count = 0;
 
-     while let Some(DomainEvent { local_ts, payload, .. }) = merge.next() {
+     while let Ok(Some(DomainEvent { local_ts, payload, .. })) = merge.next() {
          // monotonic local timestamp
          if let Some(prev) = last_ts {
              assert!(

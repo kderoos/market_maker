@@ -1,4 +1,5 @@
 use crate::cursor::event::DomainEvent;
+use crate::error::TardisError;
 
 pub struct MergeCursor {
     cursors: Vec<Box<dyn EventCursor>>,
@@ -8,7 +9,8 @@ impl MergeCursor {
     pub fn new(cursors: Vec<Box<dyn EventCursor>>) -> Self {
         Self { cursors }
     }
-    pub fn next(&mut self) -> Option<DomainEvent> {
+    /// Return Ok(Some(event)) for the next event, Ok(None) on EOF, Err on cursor errors
+    pub fn next(&mut self) -> Result<Option<DomainEvent>, TardisError> {
         let mut best = None;
 
         for (i, c) in self.cursors.iter().enumerate() {
@@ -22,10 +24,15 @@ impl MergeCursor {
             }
         }
 
-        let (idx, _) = best?;
+        let (idx, _) = match best {
+            Some(v) =>v,
+            None => return Ok(None),
+        };
+
         let event = self.cursors[idx].peek().cloned();
-        self.cursors[idx].advance();
-        event
+        //propagate possible error
+        self.cursors[idx].advance()?;
+        Ok(event)
     }
 }
 
@@ -34,7 +41,7 @@ pub trait EventCursor: Send + Sync {
     // used to decide what cursor to advance next.
     fn peek(&self) -> Option<&DomainEvent>;
     // advance moves the cursor to the next event.
-    fn advance(&mut self);
+    fn advance(&mut self) -> Result<(),TardisError>;
 }
 #[cfg(test)]
 mod tests {
@@ -85,8 +92,10 @@ binance,BTCUSDT,1000,1002,00000000-006d-1000-0000-0009e6e65676,buy,100.5,1
             Box::new(trade),
         ]);
 
+
+
         // ---- event 1: book @ 1001 → Partial
-        let e1 = merge.next().unwrap();
+        let e1 = merge.next().expect("cursor error").expect("expected event");
         assert_eq!(e1.local_ts, 1001);
         match e1.payload {
             AnyUpdate::BookUpdate(u) => assert_eq!(u.action, "Partial"),
@@ -94,7 +103,7 @@ binance,BTCUSDT,1000,1002,00000000-006d-1000-0000-0009e6e65676,buy,100.5,1
         }
 
         // ---- event 2: trade @ 1002
-        let e2 = merge.next().unwrap();
+        let e2 = merge.next().expect("cursor error").expect("expected event");
         assert_eq!(e2.local_ts, 1002);
         match e2.payload {
             AnyUpdate::TradeUpdate(_) => {}
@@ -102,7 +111,7 @@ binance,BTCUSDT,1000,1002,00000000-006d-1000-0000-0009e6e65676,buy,100.5,1
         }
 
         // ---- event 3: book @ 1003 → Update
-        let e3 = merge.next().unwrap();
+        let e3 = merge.next().expect("cursor error").expect("expected event");
         assert_eq!(e3.local_ts, 1003);
         match e3.payload {
             AnyUpdate::BookUpdate(u) => assert_eq!(u.action, "Update"),
@@ -110,7 +119,7 @@ binance,BTCUSDT,1000,1002,00000000-006d-1000-0000-0009e6e65676,buy,100.5,1
         }
 
         // ---- end
-        assert!(merge.next().is_none());
+        assert!(merge.next().expect("cursor error").is_none());
     }
 }
 
