@@ -13,9 +13,12 @@ use tokio::sync::{RwLock,broadcast};
 use common::{Connector, AnyWsUpdate, ChannelType, ConnectorCommand};
 use connectors_bitmex::BitmexConnector;
 use connectors_bitvavo::BitvavoConnector;
+use connectors_tardis::TardisConnector;
 use utils::forward::ws_forward_trade_quote;
 use strategy::{runner::run_strategy, avellaneda::AvellanedaStrategy};
 use position::run_position_engine;
+
+use std::path::PathBuf;
 
 pub struct Engine {
     tx_cmd: broadcast::Sender<ConnectorCommand>,
@@ -80,13 +83,35 @@ impl Engine {
             tx_exec.clone(), // Sender <ExecutionEvent>
         ));
 
-        // Spawn connectors
-        let mut bitmex = BitmexConnector::default();
-        let tx_bitmex_updates = tx_exchange.clone();
-        let rx_bitmex_cmd = tx_cmd.subscribe();
+        // // Spawn connectors
+        let data_root = "/opt/tardisData/datasets/".to_string();
+
+        let trades_path = data_root.clone() + "bitmex_trades_2024-08-01_XBTUSD.csv.gz";
+        let quotes_path = data_root.clone() + "bitmex_quotes_2024-08-01_XBTUSD.csv.gz";
+        let book_path = data_root.clone() + "bitmex_incremental_book_L2_2024-08-01_XBTUSD.csv.gz";
+
+
+        // Tardis connector
+        let paths = common::TardisPaths {
+            trades: PathBuf::from(trades_path),
+            book: Some(PathBuf::from(book_path)),
+            quotes: Some(PathBuf::from(quotes_path)),
+        };
+
+        let mut tardis = TardisConnector::new(paths).unwrap();
+        let tx_tardis_updates = tx_exchange.clone();
+        let rx_tardis_cmd = tx_cmd.subscribe();
         tokio::spawn(async move {
-            bitmex.run(tx_bitmex_updates, rx_bitmex_cmd).await;
+            tardis.run(tx_tardis_updates, rx_tardis_cmd).await;
         });
+
+        // // Bitmex connector
+        // let mut bitmex = BitmexConnector::default();
+        // let tx_bitmex_updates = tx_exchange.clone();
+        // let rx_bitmex_cmd = tx_cmd.subscribe();
+        // tokio::spawn(async move {
+        //     bitmex.run(tx_bitmex_updates, rx_bitmex_cmd).await;
+        // });
 
         // Avellaneda strategy
         let mut strategy = AvellanedaStrategy::new(

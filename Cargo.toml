@@ -6,6 +6,7 @@ members = [
     "connectors-bitvavo",
     "connectors-bitmex", 
     "strategy", 
-    "utils", "connectors-tardis",
+    "utils", 
+    "connectors-tardis",
 ]
 

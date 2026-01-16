@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 connectors-bitmex = { path = "../connectors-bitmex" }
 connectors-bitvavo = { path = "../connectors-bitvavo" }
+connectors-tardis = { path = "../connectors-tardis" }
 common = { version = "0.1.0", path = "../common" }
 utils = { version = "0.1.0", path = "../utils/"}
 strategy = { version = "0.1.0", path = "../strategy/"}

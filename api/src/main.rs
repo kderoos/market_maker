@@ -10,13 +10,17 @@ use futures::{SinkExt, StreamExt};
 use serde::{Serialize,Deserialize};
 use std::{net::SocketAddr, sync::Arc};
 use tokio::sync::broadcast;
-// use tracing_subscriber;
+use tracing_subscriber::{fmt,EnvFilter};
 
 
 
 #[tokio::main]
 async fn main() {
     // tracing_subscriber::fmt::init();
+    tracing_subscriber::fmt()
+        .with_env_filter(EnvFilter::from_default_env())
+        .with_target(false)
+        .init();
     let engine = Arc::new(Engine::init());
     
     // Broadcast channel for outgoing updates

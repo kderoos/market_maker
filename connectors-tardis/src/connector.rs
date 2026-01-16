@@ -139,7 +139,7 @@ binance,BTCUSDT,1000,1000,99.5,1,100.5,1
         }
 
         match &updates[1] {
-            AnyUpdate::BookUpdate(u) => assert_eq!(u.action, "Partial"),
+            AnyUpdate::BookUpdate(u) => assert_eq!(u.action, "partial"),
             _ => panic!("expected Book Partial"),
         }
 
@@ -149,7 +149,7 @@ binance,BTCUSDT,1000,1000,99.5,1,100.5,1
         }
 
         match &updates[3] {
-            AnyUpdate::BookUpdate(u) => assert_eq!(u.action, "Update"),
+            AnyUpdate::BookUpdate(u) => assert_eq!(u.action, "update"),
             _ => panic!("expected Book Update"),
         }
     }

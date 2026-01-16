@@ -98,7 +98,7 @@ binance,BTCUSDT,1000,1002,00000000-006d-1000-0000-0009e6e65676,buy,100.5,1
         let e1 = merge.next().expect("cursor error").expect("expected event");
         assert_eq!(e1.local_ts, 1001);
         match e1.payload {
-            AnyUpdate::BookUpdate(u) => assert_eq!(u.action, "Partial"),
+            AnyUpdate::BookUpdate(u) => assert_eq!(u.action, "partial"),
             _ => panic!("expected BookUpdate"),
         }
 
@@ -114,7 +114,7 @@ binance,BTCUSDT,1000,1002,00000000-006d-1000-0000-0009e6e65676,buy,100.5,1
         let e3 = merge.next().expect("cursor error").expect("expected event");
         assert_eq!(e3.local_ts, 1003);
         match e3.payload {
-            AnyUpdate::BookUpdate(u) => assert_eq!(u.action, "Update"),
+            AnyUpdate::BookUpdate(u) => assert_eq!(u.action, "update"),
             _ => panic!("expected BookUpdate"),
         }
 

@@ -33,7 +33,7 @@ impl DomainEventRow for BookRow {
             symbol: self.symbol,
             tick_size: 0.01, //TODO: get from config when implemented
             // Emit partial on snapshots, update otherwise
-            action: if self.is_snapshot { "Partial".to_string() } else { "Update".to_string() }, 
+            action: if self.is_snapshot { "partial".to_string() } else { "update".to_string() }, 
             data: vec![(self.price.to_string(), BookEntry{
                 side: self.side,
                 size: self.amount.parse::<i64>().unwrap(), //TODO: quantize using lot_size
@@ -77,20 +77,20 @@ impl BookCursor {
         match self.inner.take_next()? {
             Some(mut row_event) => {
                 let row_is_partial = match &row_event.payload {
-                    AnyUpdate::BookUpdate(u) => u.action == "Partial",
+                    AnyUpdate::BookUpdate(u) => u.action == "partial",
                     _ => false,
                 };
                 // check for snapshot event and modify action
                 if row_is_partial && !self.last_was_partial {
-                    // mark first snapshot row as Partial
+                    // mark first snapshot row as partial
                     if let AnyUpdate::BookUpdate(ref mut u) = row_event.payload {
-                        u.action = "Partial".to_string();
+                        u.action = "partial".to_string();
                     }
                 } else if row_is_partial && self.last_was_partial {
-                    // Partial already sent. Mark action "Update"
+                    // partial already sent. Mark action "update"
                     // to avoid clearing book again
                     if let AnyUpdate::BookUpdate(ref mut u) = row_event.payload {
-                        u.action = "Update".to_string();
+                        u.action = "update".to_string();
                     }
                 }
                 self.last_was_partial = row_is_partial;
@@ -152,34 +152,34 @@ binance,BTCUSDT,1000,1002,true,ask,101.0,2
         // ---- first row (snapshot → Partial)
         let e1 = cursor.peek().unwrap();
         match &e1.payload {
-            AnyUpdate::BookUpdate(u) => assert_eq!(u.action, "Partial"),
+            AnyUpdate::BookUpdate(u) => assert_eq!(u.action, "partial"),
             _ => panic!("expected BookUpdate"),
         }
-        cursor.advance();
+        let _ = cursor.advance();
 
         // ---- second row (still snapshot → Update)
         let e2 = cursor.peek().unwrap();
         match &e2.payload {
-            AnyUpdate::BookUpdate(u) => assert_eq!(u.action, "Update"),
+            AnyUpdate::BookUpdate(u) => assert_eq!(u.action, "update"),
             _ => panic!("expected BookUpdate"),
         }
-        cursor.advance();
+        let _ = cursor.advance();
 
         // ---- third row (non-snapshot → Update)
         let e3 = cursor.peek().unwrap();
         match &e3.payload {
-            AnyUpdate::BookUpdate(u) => assert_eq!(u.action, "Update"),
+            AnyUpdate::BookUpdate(u) => assert_eq!(u.action, "update"),
             _ => panic!("expected BookUpdate"),
         }
-        cursor.advance();
+        let _ = cursor.advance();
 
         // ---- last row (snapshot → Partial)
         let e4 = cursor.peek().unwrap();
         match &e4.payload {
-            AnyUpdate::BookUpdate(u) => assert_eq!(u.action, "Partial"),
+            AnyUpdate::BookUpdate(u) => assert_eq!(u.action, "partial"),
             _ => panic!("expected BookUpdate"),
         }
-        cursor.advance();
+        let _ = cursor.advance();
         // ---- end of stream
         assert!(cursor.peek().is_none());
     }

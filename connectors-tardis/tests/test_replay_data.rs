@@ -5,7 +5,6 @@ use common::AnyUpdate;
 
 #[test]
 fn replay_tardis_trades_csv_gz() {
-    // adjust path to a real file on your system or test data folder
     let path = Path::new("./tests/bitmex_trades_sample.csv.gz");
     assert!(path.exists(), "trades.csv.gz not found");
 
@@ -51,7 +50,6 @@ fn replay_tardis_trades_csv_gz() {
 }
 #[test]
 fn replay_tardis_quotes_csv_gz() {
-    // adjust path to a real file on your system or test data folder
     let path = Path::new("./tests/bitmex_quotes_sample.csv.gz");
     assert!(path.exists(), "quotes.csv.gz not found");
 
