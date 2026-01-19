@@ -9,6 +9,7 @@ async-trait = "0.1.89"
 common = { version = "0.1.0", path = "../common" }
 csv = "1.4.0"
 flate2 = "1.1.5"
+mpsc = "0.2.6"
 serde = "1.0.228"
 tempfile = "3.24.0"
 thiserror = "2.0.17"

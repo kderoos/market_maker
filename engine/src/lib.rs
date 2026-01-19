@@ -9,8 +9,8 @@ use book::{book_engine, print_book,pub_book_depth, OrderBook};
 
 use std::collections::HashMap;
 use std::sync::{Arc};
-use tokio::sync::{RwLock,broadcast};
-use common::{Connector, AnyWsUpdate, ChannelType, ConnectorCommand};
+use tokio::sync::{RwLock,mpsc,broadcast};
+use common::{Connector, AnyWsUpdate, AnyUpdate, ChannelType, ConnectorCommand};
 use connectors_bitmex::BitmexConnector;
 use connectors_bitvavo::BitvavoConnector;
 use connectors_tardis::TardisConnector;
@@ -20,6 +20,8 @@ use position::run_position_engine;
 
 use std::path::PathBuf;
 
+use volatility::run_tick_volatility_sample_ema;
+
 pub struct Engine {
     tx_cmd: broadcast::Sender<ConnectorCommand>,
     pub tx_ws: broadcast::Sender<AnyWsUpdate>,
@@ -28,36 +30,64 @@ pub struct Engine {
 
 impl Engine {
     pub fn init() -> Self {
-        let (tx_exchange, rx_exchange) = broadcast::channel(1000);
+        // let (tx_exchange, rx_exchange) = broadcast::channel(1000);
+        let (tx_exchange, rx_exchange) = mpsc::channel::<AnyUpdate>(10_000);
+        // broadcast channels for commands and ws updates
         let (tx_cmd, _) = broadcast::channel(100);
         let (tx_ws, _) = broadcast::channel(1000);
         let (tx_mid_price, _) = broadcast::channel(1000);
+        // mpsc channel for consumers of exchange updates
+        let (tx_book, rx_book) = mpsc::channel::<AnyUpdate>(5000);
+        let (tx_trade_exe, rx_trade_exe) = mpsc::channel::<AnyUpdate>(2000);
+        let (tx_trade_pen, rx_trade_pen) = mpsc::channel::<AnyUpdate>(2000);
+        let (tx_quote_vol, rx_quote_vol) = mpsc::channel::<AnyUpdate>(2000);
+        let (tx_engine, rx_engine) = mpsc::channel::<AnyUpdate>(5000);
+        // Strategy input broadcast for now.
+        let (tx_strategy, rx_strategy) = broadcast::channel::<AnyWsUpdate>(1000); 
 
         let book_state = Arc::new(RwLock::new(OrderBook::default()));
-        
+        // Fan out rx_exchange to multiple engines
+        tokio::spawn(async move {
+            let mut rx_exchange = rx_exchange;
+            loop {
+                let update = rx_exchange.recv().await;
+                match update {
+                    Some(update) => {
+                        match &update {
+                            AnyUpdate::BookUpdate(_) => {
+                                let _ = tx_engine.send(update).await;
+                            }
+                            AnyUpdate::TradeUpdate(_) => {
+                                let _ = tx_engine.send(update).await;
+                                let _ = tx_trade_pen.send(update).await;
+                            }
+                            AnyUpdate::QuoteUpdate(_) => {
+                                let _ = tx_quote_vol.send(update).await;
+                                let _ = tx_ws.send(AnyWsUpdate::Quote(update.as_quote().unwrap())).unwrap();
+                            }
+                        }
+                    }
+                    None => {
+                        break;
+                    }
+                }
+            }
+        });
         // Spawn engine tasks
-        let book_state_clone = book_state.clone();
-        tokio::spawn(book_engine(rx_exchange, book_state_clone));
-        // Spawn mid_price publisher and volatility engine
-        let book_state_clone = book_state.clone();
-        tokio::spawn(volatility::midprice_sampler(
-            tx_mid_price.clone(),
-            book_state_clone,
-            1000, //interval_ms
-            "XBTUSDT".to_string(),
-        ));
-        tokio::spawn(volatility::volatility_engine(
-            tx_mid_price.subscribe(),
+        tokio::spawn(run_tick_volatility_sample_ema(
+            rx_quote_vol,
             tx_ws.clone(),
-            60,    //window_len
-            1000.0,  //sample_interval_ms
+            500, //window_len (ticks)
+            0.100, //interval_s
+            2.0, //ema_half_life (s)
+            None, //sigma_min
+            None, //sigma_max
             "XBTUSDT".to_string(),
         ));
 
         // Spawn penetration analyzer
-        let rx_penetration = tx_exchange.subscribe(); 
         tokio::spawn(penetration::engine(
-            rx_penetration,
+            rx_trade_pen,
             tx_ws.clone(),
             book_state.clone(),
             120, //window_len
@@ -65,12 +95,18 @@ impl Engine {
             500, //interval_ms
             "XBTUSDT".to_string(),
         ));
-        // Forward trade, quote from rx_exchange to tx_ws
-        tokio::spawn(ws_forward_trade_quote(
-            tx_exchange.subscribe(),
-            tx_ws.clone(),
+        // // Forward trade, quote from rx_exchange to tx_ws
+        // tokio::spawn(ws_forward_trade_quote(
+        //     tx_exchange.subscribe(),
+        //     tx_ws.clone(),
+        // ));
+
+        // Spawn book engine
+        let book_state_clone = book_state.clone();
+        tokio::spawn(book_engine(
+            rx_engine,
+            book_state_clone,
         ));
-        
 
         // spawn execution engine
         let (tx_exec, _) = broadcast::channel(100);

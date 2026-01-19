@@ -1,5 +1,5 @@
 use std::sync::{Arc};
-use tokio::sync::{broadcast,RwLock};
+use tokio::sync::{broadcast,mpsc,RwLock};
 use common::{AnyUpdate, BookEntry,BookUpdate};
 use std::collections::{HashMap}; 
 
@@ -141,15 +141,12 @@ fn top_n_with_padding(entries: &HashMap<i64, BookEntry>, n: usize, descending: b
     result
 }
 
-pub async fn book_engine(mut rx: broadcast::Receiver<AnyUpdate>, book_state: Arc<RwLock<OrderBook>>) {
+pub async fn book_engine(mut rx: mpsc::Receiver<AnyUpdate>, book_state: Arc<RwLock<OrderBook>>) {
     println!("Book engine starting...");
-    // let mut count: u128 = 0;
-    // let mut avg_time: u128 = 0;
-    while let Ok(update) = rx.recv().await {
+    while let Some(update) = rx.recv().await {
         if let AnyUpdate::BookUpdate(book_update) = update {
             update_book_state(book_update, book_state.clone()).await;
             let state = book_state.read().await;
-            // let best_bid = top_n_with_padding(&state.bids.entries,1,true);
             }
     }
 }
@@ -211,7 +208,7 @@ mod tests {
     #[tokio::test]
     async fn test_book_engine_insert_and_delete() {
         let book_state = Arc::new(RwLock::new(init_book()));
-        let (tx, rx) = broadcast::channel(10);
+        let (tx, rx) = mpsc::channel::<AnyUpdate>(10);
         let book_state_clone = book_state.clone();
         tokio::spawn(book_engine(rx, book_state_clone));
 
@@ -229,7 +226,7 @@ mod tests {
             ts_exchange: None,
             ts_received: 123456789000000,
         });
-        tx.send(insert_update).unwrap();
+        tx.send(insert_update).await.unwrap();
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await; // wait for processing
 
         {
@@ -252,7 +249,7 @@ mod tests {
             ts_exchange: None,
             ts_received: 2,
         });
-        tx.send(delete_update).unwrap();
+        tx.send(delete_update).await.unwrap();
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await; // wait for processing
 
         {

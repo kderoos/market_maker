@@ -10,8 +10,8 @@ use std::collections::{HashSet,HashMap};
 use chrono::{DateTime};
 use async_trait::async_trait;
 use common::{OrderSide,InstrumentData, Connector, ConnectorCommand, Subscription, AnyUpdate, QuoteUpdate, TradeUpdate, BookUpdate, BookEntry};
-// use tokio::sync::mpsc::Sender;
-use tokio::sync::broadcast::{Sender,Receiver};
+use tokio::sync::mpsc;
+use tokio::sync::broadcast;
 
 
 pub struct BitmexConnector{
@@ -57,7 +57,7 @@ impl Connector for BitmexConnector {
         "bitmex"
     }
 
-    async fn run(&mut self, tx: Sender<AnyUpdate>, mut rx: Receiver<ConnectorCommand>) {
+    async fn run(&mut self, tx: mpsc::Sender<AnyUpdate>, mut rx: broadcast::Receiver<ConnectorCommand>) {
         println!("BitMex connector starting...");
 
         // let url = "wss://ws.bitmex.com/realtime";
@@ -131,7 +131,7 @@ impl BitmexConnector {
     async fn handle_message(
         &self,
         message: Result<Message,Error>,
-        tx: &Sender<AnyUpdate>,
+        tx: &mpsc::Sender<AnyUpdate>,
     ){
         match message {
             Ok(msg) => {
@@ -163,8 +163,7 @@ impl BitmexConnector {
                                             ts_exchange: parse_ts_bitmex(&ticker.ts_exchange),
                                             ts_received: chrono::Utc::now().timestamp_micros(),
                                         };
-                                        // tx.send(AnyUpdate::TradeUpdate(update)).await.expect("Failed to send price update to engine");
-                                        tx.send(AnyUpdate::TradeUpdate(update)).expect("Failed to send price update to engine");
+                                        tx.send(AnyUpdate::TradeUpdate(update)).await.expect("Failed to send price update to engine");
                                     }
                                 }
                             }
@@ -194,8 +193,7 @@ impl BitmexConnector {
                                             ts_exchange: parse_ts_bitmex(&ticker.ts_exchange),
                                             ts_received: chrono::Utc::now().timestamp_micros(),
                                         };
-                                        // tx.send(AnyUpdate::QuoteUpdate(update)).await.expect("Failed to send price update to engine");
-                                        tx.send(AnyUpdate::QuoteUpdate(update)).expect("Failed to send price update to engine");
+                                        tx.send(AnyUpdate::QuoteUpdate(update)).await.expect("Failed to send price update to engine");
                                     }
                                 }
                             }
@@ -228,8 +226,7 @@ impl BitmexConnector {
                                                 ts_exchange: msg.data.first().and_then(|d| parse_ts_bitmex(&d.timestamp)), // Approximate with first entry's timestamp
                                                 ts_received: chrono::Utc::now().timestamp_micros(),
                                         };
-                                    // tx.send(AnyUpdate::BookUpdate(update)).await.expect("Failed to send order book update to engine");
-                                    tx.send(AnyUpdate::BookUpdate(update)).expect("Failed to send order book update to engine");
+                                    tx.send(AnyUpdate::BookUpdate(update)).await.expect("Failed to send order book update to engine");
                                 }
                             }
                             Err(e) => {  

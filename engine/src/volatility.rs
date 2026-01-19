@@ -18,6 +18,7 @@ use std::collections::VecDeque;
 use std::sync::{Arc};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::{RwLock,broadcast::{Sender, Receiver}};
+use tokio::sync::mpsc;
 use crate::book::OrderBook;
 
 /// Number of microseconds per second, used for timestamp normalization.
@@ -150,7 +151,7 @@ pub async fn midprice_sampler(
 /// - Emits `AnyWsUpdate::Volatility` events
 ///
 /// It encapsulates both sampling state and volatility estimation.
-pub async fn volatility_engine(
+pub async fn volatility_engine_midprice(
     mut rx: Receiver<AnyWsUpdate>,
     tx_ws: Sender<AnyWsUpdate>,
     window_len: usize,
@@ -171,6 +172,162 @@ pub async fn volatility_engine(
         }
     }
 }
+pub struct VolatilityState {
+    pub sigma: f64,
+    pub sigma_raw: Option<f64>,
+    pub timestamp: i64,
+}
+use utils::ewma;
+/// Runs a tick-driven volatility engine with interval-based EWMA publishing.
+///
+/// This engine consumes a stream of quote updates and produces volatility
+/// estimates suitable for control-loop–based trading strategies
+/// (e.g. Avellaneda–Stoikov).
+///
+/// ## Design
+///
+/// The engine operates on two distinct time scales:
+///
+/// 1. **Event time (per quote)**  
+///    - Every quote contributes to the raw volatility estimate
+///    - Volatility is estimated from rolling midprice log-returns
+///    - Time deltas are derived from quote timestamps
+///
+/// 2. **Interval time (per publish interval)**  
+///    - Volatility is published at a fixed interval derived from event time
+///    - EWMA smoothing is applied *once per interval*, not per quote
+///    - Missing intervals are handled explicitly via catch-up logic
+///
+/// This separation ensures:
+/// - Accurate microstructure-aware volatility estimation
+/// - Stable, interval-invariant control signals for strategies
+/// - Correct behavior for both live feeds and historical replay
+///
+/// ## Interval Handling
+///
+/// Publishing is driven entirely by quote timestamps (event time).
+/// If a quote timestamp jumps across multiple intervals, the engine:
+///
+/// - Advances the interval clock one interval at a time
+/// - Applies EWMA decay once per interval
+/// - Emits one volatility update per crossed interval
+///
+/// This guarantees that:
+/// - EWMA half-life semantics remain correct
+/// - Volatility decays naturally during quiet periods
+/// - No intervals are skipped, even when replaying sparse data
+///
+/// ## EWMA Smoothing
+///
+/// EWMA is applied to **variance**, not volatility:
+///
+/// ```text
+/// v_t = sigma_raw^2
+/// v_ewma = λ v_ewma + (1 - λ) v_t
+/// sigma = sqrt(v_ewma)
+/// ```
+///
+/// The decay factor `λ` is derived from the publish interval and the
+/// specified half-life, making the smoothing invariant to interval choice.
+///
+/// ## Parameters
+///
+/// - `window_len`: Number of log-returns retained for raw volatility estimation
+/// - `interval_sec`: Publish interval in seconds (event-time–based)
+/// - `ema_half_life`: EWMA half-life in seconds
+/// - `sigma_min`: Optional lower bound on published volatility
+/// - `sigma_max`: Optional upper bound on published volatility
+///
+/// ## Output
+///
+/// Emits `AnyWsUpdate::Volatility` messages containing:
+/// - Symbol
+/// - Smoothed volatility estimate
+/// - Event-time interval timestamp
+///
+/// ## Notes
+///
+/// - Midprice is computed as `(bid + ask) / 2`
+/// - If no new quotes arrive in an interval, the last volatility is reused
+///   and EWMA decay is still applied
+/// - This function does not use wall-clock timers and is safe for replay
+pub async fn run_tick_volatility_sample_ema(
+    mut rx: mpsc::Receiver<AnyUpdate>,
+    tx_strategy: Sender<AnyWsUpdate>,
+    window_len: usize,
+    interval_sec: f64,
+    ema_half_life: f64,
+    sigma_min: Option<f64>,
+    sigma_max: Option<f64>,
+    symbol: String,
+) {
+    let mut sampler = MidpriceVolatilitySampler::new(window_len);
+
+    let mut state = Arc::new(RwLock::new(VolatilityState {
+        sigma: 0.0,
+        sigma_raw: None,
+        timestamp: 0,
+    }));
+    // Interval Publisher for EWMA variance
+    let mut ema_var = ewma::EwmaVariance::new(interval_sec, ema_half_life);
+    let mut last_vol_ts = 0_i64;
+
+    // interval in microseconds, at least 1 microsecond
+    let interval_us = ((interval_sec * MICROS_PER_SECOND).round() as i64).max(1);
+    let mut next_publish_ts: Option<i64> = None;
+
+    let mut sigma_raw: Option<f64> = None;
+    let mut sigma_ewma: f64 = 0.0;
+
+    while let Some(update) = rx.recv().await {
+        let quote = match update {
+            AnyUpdate::QuoteUpdate(q) => q,
+            _ => continue,
+        };
+
+        // Update raw volatility (event-time)
+        if let (Some(bid), Some(ask)) = (quote.best_bid, quote.best_ask) {
+            let mid = (bid + ask) / 2.0;
+            if let Some(sigma) = sampler.sample(mid, quote.ts_received) {
+                sigma_raw = Some(sigma);
+            }
+        } else {
+            continue;
+        };
+        // Initialize interval clock on first quote
+        if next_publish_ts.is_none() {
+            next_publish_ts = Some(
+                (quote.ts_received / interval_us + 1) * interval_us
+            );
+        }
+
+        // Catch up across all crossed intervals
+        while quote.ts_received >= next_publish_ts.unwrap() {
+            let input_sigma = sigma_raw.unwrap_or(sigma_ewma);
+
+            let mut sigma = ema_var.update(input_sigma);
+
+            // Optional clipping
+            if let Some(min) = sigma_min {
+                sigma = sigma.max(min);
+            }
+            if let Some(max) = sigma_max {
+                sigma = sigma.min(max);
+            }
+
+            sigma_ewma = sigma;
+
+            tx_strategy.send(AnyWsUpdate::Volatility(VolatilityUpdate {
+                symbol: symbol.clone(),
+                sigma,
+                timestamp: next_publish_ts.unwrap(),
+            })).ok();
+
+            next_publish_ts = Some(next_publish_ts.unwrap() + interval_us);
+        }
+    }
+}
+
 /// Stateful midprice-driven volatility sampler.
 ///
 /// Makes sure volatility scales correctly with time.
@@ -232,6 +389,7 @@ impl MidpriceVolatilitySampler {
 mod tests {
     use super::*;
     use std::collections::VecDeque;
+    use tokio::sync::{mpsc, broadcast};
 
     const EPS: f64 = 1e-10;
 
@@ -362,5 +520,141 @@ mod tests {
 
         assert!(sigma.unwrap() == 0.0);
     }
+    use common::QuoteUpdate;
+    fn quote(ts: i64, bid: f64, ask: f64, symbol: &str) -> AnyUpdate {
+        AnyUpdate::QuoteUpdate(QuoteUpdate {
+            exchange: "TEST_EX".to_string(),
+            symbol: symbol.to_string(),
+            best_bid: Some(bid),
+            best_ask: Some(ask),
+            ts_exchange: None,
+            ts_received: ts,
+        })
+    }
+    #[tokio::test]
+    async fn test_publishes_on_interval_boundaries() {
+        let (tx_in, rx_in) = mpsc::channel(16);
+        let (tx_out, mut rx_out) = broadcast::channel(16);
 
+        tokio::spawn(run_tick_volatility_sample_ema(
+            rx_in,
+            tx_out,
+            5,
+            1.0,     // 1 second interval
+            10.0,    // long half-life
+            None,
+            None,
+            "TEST".to_string(),
+        ));
+
+        // Two quotes within same interval
+        tx_in.send(quote(1_000_000, 100.0, 100.0, "TEST")).await.unwrap();
+        tx_in.send(quote(1_500_000, 100.1, 100.1, "TEST")).await.unwrap();
+
+        // Cross interval boundary
+        tx_in.send(quote(2_100_000, 100.2, 100.2, "TEST")).await.unwrap();
+
+        let mut vols = vec![];
+        while let Ok(update) = rx_out.try_recv() {
+            if let AnyWsUpdate::Volatility(v) = update {
+                vols.push(v.timestamp);
+            }
+        }
+
+        assert_eq!(vols.len(), 1);
+        assert_eq!(vols[0], 2_000_000);
+    }
+    #[tokio::test]
+    async fn test_multi_interval_catch_up() {
+        let (tx_in, rx_in) = mpsc::channel(16);
+        let (tx_out, mut rx_out) = broadcast::channel(16);
+
+        tokio::spawn(run_tick_volatility_sample_ema(
+            rx_in,
+            tx_out,
+            5,
+            1.0,
+            5.0,
+            None,
+            None,
+            "TEST".to_string(),
+        ));
+
+        // First quote initializes clock
+        tx_in.send(quote(1_000_000, 100.0, 100.0, "TEST")).await.unwrap();
+
+        // Jump 5 seconds ahead
+        tx_in.send(quote(6_000_000, 100.5, 100.5, "TEST")).await.unwrap();
+
+        let mut count = 0;
+        while let Ok(update) = rx_out.try_recv() {
+            if let AnyWsUpdate::Volatility(_) = update {
+                count += 1;
+            }
+        }
+
+        // Should publish for intervals: 2s,3s,4s,5s,6s
+        assert_eq!(count, 5);
+    }
+    #[tokio::test]
+    async fn test_ewma_decay_without_quotes() {
+        let (tx_in, rx_in) = mpsc::channel(16);
+        let (tx_out, mut rx_out) = broadcast::channel(16);
+
+        tokio::spawn(run_tick_volatility_sample_ema(
+            rx_in,
+            tx_out,
+            5,
+            1.0,
+            1.0, // fast decay
+            None,
+            None,
+            "TEST".to_string(),
+        ));
+
+        tx_in.send(quote(1_000_000, 100.0, 100.0, "TEST")).await.unwrap();
+        tx_in.send(quote(1_100_000, 101.0, 101.0, "TEST")).await.unwrap();
+        tx_in.send(quote(5_000_000, 101.0, 101.0, "TEST")).await.unwrap();
+
+        let mut sigmas = vec![];
+        while let Ok(update) = rx_out.try_recv() {
+            if let AnyWsUpdate::Volatility(v) = update {
+                sigmas.push(v.sigma);
+            }
+        }
+
+        // EWMA should monotonically decay
+        for w in sigmas.windows(2) {
+            assert!(w[1] <= w[0] + 1e-12);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_sigma_clipping() {
+        let (tx_in, rx_in) = mpsc::channel(16);
+        let (tx_out, mut rx_out) = broadcast::channel(16);
+    
+        tokio::spawn(run_tick_volatility_sample_ema(
+            rx_in,
+            tx_out,
+            5,
+            1.0,
+            1.0,
+            Some(0.1),
+            Some(0.2),
+            "TEST".to_string(),
+        ));
+    
+        tx_in.send(quote(1_000_000, 100.0, 100.0, "TEST")).await.unwrap();
+        tx_in.send(quote(1_100_000, 120.0, 120.0, "TEST")).await.unwrap();
+        tx_in.send(quote(2_000_000, 120.0, 120.0, "TEST")).await.unwrap();
+    
+        while let Ok(update) = rx_out.try_recv() {
+            if let AnyWsUpdate::Volatility(v) = update {
+                assert!(v.sigma >= 0.1);
+                assert!(v.sigma <= 0.2);
+            }
+        }
+    }
+ 
 }

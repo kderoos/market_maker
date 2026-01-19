@@ -137,8 +137,7 @@ impl Strategy for AvellanedaStrategy {
                     //Only update if both sides are present
                     _ => {}
                 }
-                // Only post orders on quote update
-                return orders;
+                // Continue to post orders
             }
             AnyWsUpdate::Penetration(p) => {
                 // Pull A and k from fit
@@ -146,11 +145,13 @@ impl Strategy for AvellanedaStrategy {
                     self.a = Some(a);
                     self.k = Some(k);
                 }
+                // Skip posting orders on penetration update.
+                return orders;
             }
             AnyWsUpdate::Volatility(v) => {
                 // Update sigma
                 self.sigma = Some(v.sigma);
-                // Only post orders on penetration update
+                // Skip posting orders on volatility update
                 return orders;
             }
 
@@ -260,20 +261,32 @@ mod tests {
             best_ask: Some(102.0),
         }));
         // Set sigma
-        strat. on_market(&AnyWsUpdate::Volatility(common::VolatilityUpdate {
+        strat.on_market(&AnyWsUpdate::Volatility(common::VolatilityUpdate {
             symbol: "XBTUSDT".into(),
             sigma: 0.5,
             timestamp: 0,
         }));
         // Set liquidity params
-        let orders = strat.on_market(&AnyWsUpdate::Penetration(PenetrationUpdate {
+        strat.on_market(&AnyWsUpdate::Penetration(PenetrationUpdate {
             timestamp: 0,
             symbol: "XBTUSDT".into(),
             counts: vec![],
             fit_A: Some(10.0),
             fit_k: Some(1.5),
         }));
-    
+        // New quotes triggers orders.
+        let orders = strat.on_market(&AnyWsUpdate::Quote(QuoteUpdate {
+            base: "XBT".into(),
+            quote: "USDT".into(),
+            exchange: "TestEx".into(),
+            fee: 0.001.to_string(),
+            tick_size: 0.01,
+            ts_exchange: None,
+            ts_received: 0,
+            best_bid: Some(100.0),
+            best_ask: Some(102.0),
+        }));
+
         assert_eq!(orders.len(), 2);
 
         let bid = orders.iter().find(|o| matches!(o, Order::Limit { side: OrderSide::Buy, .. })).unwrap();

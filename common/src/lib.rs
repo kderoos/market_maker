@@ -3,8 +3,8 @@ pub use types::{ChannelType, QuoteUpdate, BookUpdate, BookEntry};
 
 use serde::{Serialize, Deserialize};
 use async_trait::async_trait;
-// use tokio::sync::mpsc::Sender;
-use tokio::sync::broadcast::{Sender, Receiver};
+use tokio::sync::mpsc;
+use tokio::sync::broadcast;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone)]
@@ -151,6 +151,6 @@ pub enum ConnectorCommand {
 pub trait Connector: Send + Sync {
     fn name(&self) -> &'static str;
     // fn supported_symbols(&self) -> Vec<String>;
-    async fn run(&mut self, tx: Sender<AnyUpdate>, mut rx: Receiver<ConnectorCommand>);
+    async fn run(&mut self, tx: mpsc::Sender<AnyUpdate>, mut rx: broadcast::Receiver<ConnectorCommand>);
 }
 

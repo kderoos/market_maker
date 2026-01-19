@@ -2,7 +2,8 @@ use crate::cursor::merge::{MergeCursor,EventCursor};
 // use crate::normalize::normalize;
 use async_trait::async_trait;
 use common::{AnyUpdate, Connector, ConnectorCommand, TardisPaths};
-use tokio::sync::broadcast::{Receiver, Sender};
+use tokio::sync::{broadcast,mpsc};
+use tokio::sync::mpsc::error::TryRecvError;
 use crate::cursor::{generic::CsvCursor,trade::TradeCursor,quote::QuoteCursor,book::BookCursor};
 use crate::error::TardisError;
 use tracing;
@@ -39,17 +40,17 @@ impl Connector for TardisConnector {
 
     async fn run(
         &mut self,
-        tx: Sender<AnyUpdate>,
-        mut rx: Receiver<ConnectorCommand>,
+        tx: tokio::sync::mpsc::Sender<AnyUpdate>,
+        mut rx: broadcast::Receiver<ConnectorCommand>,
     ) {
         loop {
             // handle control commands first
             match rx.try_recv() {
                     Ok(ConnectorCommand::ReplayStop) => break,
                     Ok(_) => {},
-                    Err(tokio::sync::broadcast::error::TryRecvError::Empty) => {}
-                    Err(tokio::sync::broadcast::error::TryRecvError::Closed) => break, 
-                    Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => todo!(),
+                    Err(broadcast::error::TryRecvError::Empty) => {}
+                    Err(broadcast::error::TryRecvError::Closed) => break, 
+                    Err(broadcast::error::TryRecvError::Lagged(_)) => todo!(),
                 }
 
             let event = match self.cursor.next() {
@@ -62,7 +63,8 @@ impl Connector for TardisConnector {
             };
 
             // emit update
-            if tx.send(event.payload).is_err() {
+            if let Err(e) = tx.send(event.payload).await {
+                eprintln!("Receiver dropped, stopping connector: {:?}", e);
                 break;
             }
         }
@@ -119,7 +121,7 @@ binance,BTCUSDT,1000,1000,99.5,1,100.5,1
 
         let mut connector = TardisConnector::new(paths).unwrap();
 
-        let (tx_updates, mut rx_updates) = broadcast::channel(16);
+        let (tx_updates, mut rx_updates) = mpsc::channel::<AnyUpdate>(16);
         let (_tx_cmd, rx_cmd) = broadcast::channel(4);
 
         connector.run(tx_updates, rx_cmd).await;
@@ -167,7 +169,7 @@ binance,BTCUSDT,1000,1000,silly-id,buy,100.5,1
 
         let mut connector = TardisConnector::new(paths).unwrap();
 
-        let (tx_updates, mut rx_updates) = broadcast::channel(16);
+        let (tx_updates, mut rx_updates) = mpsc::channel::<AnyUpdate>(16);
         let (_tx_cmd, rx_cmd) = broadcast::channel(4);
 
         connector.run(tx_updates, rx_cmd).await;
