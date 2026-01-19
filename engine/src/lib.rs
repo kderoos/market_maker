@@ -61,9 +61,9 @@ impl Engine {
                                 let _ = tx_engine.send(update).await;
                                 let _ = tx_trade_pen.send(update).await;
                             }
-                            AnyUpdate::QuoteUpdate(_) => {
+                            AnyUpdate::QuoteUpdate(quote) => {
                                 let _ = tx_quote_vol.send(update).await;
-                                let _ = tx_ws.send(AnyWsUpdate::Quote(update.as_quote().unwrap())).unwrap();
+                                let _ = tx_ws.send(AnyWsUpdate::Quote(quote)).unwrap();
                             }
                         }
                     }

@@ -184,19 +184,19 @@ pub async fn engine(
                 };
                 // record trade penetration
                 aggregator.current.midprice_tick = mid_price_tick;
-                aggregator.current.record_trade(trade).await;
+                aggregator.current.record_trade(trade.clone()).await;
 
                 // Initialize clock if first event was trade
                 if next_interval_ts.is_none() {
                     let interval_start = 
-                        (trade.ts_received / interval_ms).round() * interval_ms;
+                        ( trade.ts_received / interval_ms ) * interval_ms;
                     next_interval_ts = Some(interval_start + interval_ms);
                 }
 
                 // Catch up across all crossed intervals
                 while trade.ts_received >= next_interval_ts.unwrap() {
                     let mut last = aggregator.current.collect_and_reset(mid_price_tick);
-                    last.timestamp = next_interval_ts.unwrap();
+                    last.timestamp = next_interval_ts.unwrap() as u64;
                     next_interval_ts = Some( next_interval_ts.unwrap() + interval_ms);
 
                     _ = aggregator.rotate_aggregate(last.clone());
@@ -212,6 +212,7 @@ pub async fn engine(
 
                         let ws_update = AnyWsUpdate::Penetration(depth_snapshot);
                         let _ = tx_ws.send(ws_update);
+                    }
                 }
             }
             AnyUpdate::QuoteUpdate(quote) => {
@@ -223,7 +224,7 @@ pub async fn engine(
                     // Initialize next_interval_ts on first quote or first trade
                     if next_interval_ts.is_none() {
                         let interval_start = 
-                            (quote.ts_received / interval_ms).round() * interval_ms;
+                            ( quote.ts_received / interval_ms ) * interval_ms;
                         next_interval_ts = Some(interval_start + interval_ms);
                     }
 
@@ -232,10 +233,10 @@ pub async fn engine(
             _ => {
                 continue;   
             }
-            }
         }
     }
 }
+
 impl From<&Counts> for SimpleSLR {
     //y = X*beta
     fn from(counts: &Counts)-> Self{
