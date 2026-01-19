@@ -521,16 +521,20 @@ mod tests {
         assert!(sigma.unwrap() == 0.0);
     }
     use common::QuoteUpdate;
-    fn quote(ts: i64, bid: f64, ask: f64, symbol: &str) -> AnyUpdate {
+    fn quote(ts: i64, bid: f64, ask: f64, _symbol: &str) -> AnyUpdate {
         AnyUpdate::QuoteUpdate(QuoteUpdate {
             exchange: "TEST_EX".to_string(),
-            symbol: symbol.to_string(),
+            base: "test".to_string(),
+            quote: "usd".to_string(),
+            fee: "0.0".to_string(),
+            tick_size: 0.01,   
             best_bid: Some(bid),
             best_ask: Some(ask),
             ts_exchange: None,
             ts_received: ts,
         })
     }
+    use tokio::time::{timeout, Duration};
     #[tokio::test]
     async fn test_publishes_on_interval_boundaries() {
         let (tx_in, rx_in) = mpsc::channel(16);
@@ -555,7 +559,9 @@ mod tests {
         tx_in.send(quote(2_100_000, 100.2, 100.2, "TEST")).await.unwrap();
 
         let mut vols = vec![];
-        while let Ok(update) = rx_out.try_recv() {
+        while let Ok(Ok(update)) =
+            timeout(Duration::from_millis(50), rx_out.recv()).await
+        {
             if let AnyWsUpdate::Volatility(v) = update {
                 vols.push(v.timestamp);
             }
@@ -587,7 +593,9 @@ mod tests {
         tx_in.send(quote(6_000_000, 100.5, 100.5, "TEST")).await.unwrap();
 
         let mut count = 0;
-        while let Ok(update) = rx_out.try_recv() {
+        while let Ok(Ok(update)) =
+            timeout(Duration::from_millis(50), rx_out.recv()).await
+        {
             if let AnyWsUpdate::Volatility(_) = update {
                 count += 1;
             }

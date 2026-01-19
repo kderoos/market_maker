@@ -33,9 +33,9 @@ impl Engine {
         // let (tx_exchange, rx_exchange) = broadcast::channel(1000);
         let (tx_exchange, rx_exchange) = mpsc::channel::<AnyUpdate>(10_000);
         // broadcast channels for commands and ws updates
-        let (tx_cmd, _) = broadcast::channel(100);
-        let (tx_ws, _) = broadcast::channel(1000);
-        let (tx_mid_price, _) = broadcast::channel(1000);
+        let (tx_cmd, _) = broadcast::channel::<ConnectorCommand>(100);
+        let (tx_ws, _) = broadcast::channel::<AnyWsUpdate>(1000);
+        let (tx_mid_price, _) = broadcast::channel::<AnyWsUpdate>(1000);
         // mpsc channel for consumers of exchange updates
         let (tx_book, rx_book) = mpsc::channel::<AnyUpdate>(5000);
         let (tx_trade_exe, rx_trade_exe) = mpsc::channel::<AnyUpdate>(2000);
@@ -47,6 +47,7 @@ impl Engine {
 
         let book_state = Arc::new(RwLock::new(OrderBook::default()));
         // Fan out rx_exchange to multiple engines
+        let tx_ws_clone = tx_ws.clone();
         tokio::spawn(async move {
             let mut rx_exchange = rx_exchange;
             loop {
@@ -55,15 +56,15 @@ impl Engine {
                     Some(update) => {
                         match &update {
                             AnyUpdate::BookUpdate(_) => {
-                                let _ = tx_engine.send(update).await;
+                                let _ = tx_engine.send(update.clone()).await;
                             }
                             AnyUpdate::TradeUpdate(_) => {
-                                let _ = tx_engine.send(update).await;
-                                let _ = tx_trade_pen.send(update).await;
+                                let _ = tx_engine.send(update.clone()).await;
+                                let _ = tx_trade_pen.send(update.clone()).await;
                             }
                             AnyUpdate::QuoteUpdate(quote) => {
-                                let _ = tx_quote_vol.send(update).await;
-                                let _ = tx_ws.send(AnyWsUpdate::Quote(quote)).unwrap();
+                                let _ = tx_quote_vol.send(update.clone()).await;
+                                let _ = tx_ws_clone.send(AnyWsUpdate::Quote(quote.clone())).unwrap();
                             }
                         }
                     }
