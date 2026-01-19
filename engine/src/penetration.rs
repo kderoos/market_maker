@@ -163,73 +163,76 @@ pub async fn engine(
     book_state: Arc<RwLock<OrderBook>>, 
     window_len: usize,
     num_bins: usize,
-    interval_ms: u64,
+    interval_ms: i64,
     symbol: String,
 ) {
     let mut aggregator = PenetrationAggregator::new(window_len, num_bins); // window size 100, 50 bins
-    let interval = tokio::time::Duration::from_millis(interval_ms);
-    let mut ticker = tokio::time::interval(interval);
-    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut next_interval_ts: Option<i64> = None;
+    let mut last_midprice_tick: Option<u64> = None;
+
     println!("Penetration engine started for symbol {}", symbol);
-    loop {
-        tokio::select!{
-            // Process trade updates
-            Ok(update) = rx.recv() => {
-                match update {
-                    AnyUpdate::TradeUpdate(trade) => {
-                        let mid_price_tick = aggregator.current.midprice_tick;
-                        aggregator.current.record_trade(trade).await;
-                    }
-                    //Ignore other updates
-                    _ => { 
+
+    while let Some(update) = rx.recv().await {
+        match update {
+            AnyUpdate::TradeUpdate(trade) => {
+                let mid_price_tick = match last_midprice_tick {
+                    Some(tick) => tick,
+                    None => {
+                        // Skip trade if no midprice available yet
                         continue;
                     }
+                };
+                // record trade penetration
+                aggregator.current.midprice_tick = mid_price_tick;
+                aggregator.current.record_trade(trade).await;
+
+                // Initialize clock if first event was trade
+                if next_interval_ts.is_none() {
+                    let interval_start = 
+                        (trade.ts_received / interval_ms).round() * interval_ms;
+                    next_interval_ts = Some(interval_start + interval_ms);
+                }
+
+                // Catch up across all crossed intervals
+                while trade.ts_received >= next_interval_ts.unwrap() {
+                    let mut last = aggregator.current.collect_and_reset(mid_price_tick);
+                    last.timestamp = next_interval_ts.unwrap();
+                    next_interval_ts = Some( next_interval_ts.unwrap() + interval_ms);
+
+                    _ = aggregator.rotate_aggregate(last.clone());
+
+                    if let Ok((A,k)) = aggregator.fit_exponential(){
+                        let depth_snapshot = PenetrationUpdate {
+                            timestamp: last.timestamp.clone(),
+                            symbol: symbol.clone(),
+                            counts: aggregator.aggregated_counts.clone().as_vec(), // Keep Counts implementation local.
+                            fit_A: Some(A),
+                            fit_k: Some(k),
+                        };
+
+                        let ws_update = AnyWsUpdate::Penetration(depth_snapshot);
+                        let _ = tx_ws.send(ws_update);
                 }
             }
-            // Each interval, fetch midprice and rotate aggregator
-            _ = ticker.tick() => {
-                    let mid_price_tick = {
-                        let state = book_state.read().await;
-                        state.get_midprice_tick()
-                    };
-                    // Handle empty orderbook
-                    match mid_price_tick {
-                        Some(new_midprice_tick) => { 
-                            let last = aggregator.current.collect_and_reset(new_midprice_tick);
-                            
-                            _ = aggregator.rotate_aggregate(last.clone());
-                            let (A,k) = match aggregator.fit_exponential(){
-                                Err(e) => {
-                                    // eprintln!("Penetration depth regression fit error: {}", e);
-                                    // eprintln!("Aggregated counts: {:?}", aggregator.aggregated_counts.clone().as_vec());
-                                    continue;
-                                }
-                                Ok((A,k)) => { 
-                                    // println!("Penetration fit results: A = {}, k = {}", A, k);
-                                    (A,k)
-                                }
-                            };
+            AnyUpdate::QuoteUpdate(quote) => {
+                if let (Some(bid), Some(ask)) = (quote.best_bid, quote.best_ask) {
+                    let midprice = (bid + ask) / 2.0;
+                    let midprice_tick = (midprice / quote.tick_size).round() as u64;
+                    last_midprice_tick = Some(midprice_tick);
 
-                            let depth_snapshot = PenetrationUpdate {
-                                timestamp: last.timestamp.clone(),
-                                symbol: symbol.clone(),
-                                counts: aggregator.aggregated_counts.clone().as_vec(), // Keep Counts implementation local.
-                                fit_A: Some(A),
-                                fit_k: Some(k),
-                            };
+                    // Initialize next_interval_ts on first quote or first trade
+                    if next_interval_ts.is_none() {
+                        let interval_start = 
+                            (quote.ts_received / interval_ms).round() * interval_ms;
+                        next_interval_ts = Some(interval_start + interval_ms);
+                    }
 
-
-                            let ws_update = AnyWsUpdate::Penetration(depth_snapshot);
-                            let _ = tx_ws.send(ws_update);
-                        }
-                        None => {
-                            continue;
-                        }
-                    };
-
+                }
             }
-
-
+            _ => {
+                continue;   
+            }
+            }
         }
     }
 }
