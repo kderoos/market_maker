@@ -39,7 +39,7 @@ impl Engine {
         // mpsc channel for consumers of exchange updates
         let (tx_book, rx_book) = mpsc::channel::<AnyUpdate>(5000);
         let (tx_trade_exe, rx_trade_exe) = mpsc::channel::<AnyUpdate>(2000);
-        let (tx_trade_pen, rx_trade_pen) = mpsc::channel::<AnyUpdate>(2000);
+        let (tx_trade_quote_pen, rx_trade_quote_pen) = mpsc::channel::<AnyUpdate>(2000);
         let (tx_quote_vol, rx_quote_vol) = mpsc::channel::<AnyUpdate>(2000);
         let (tx_quote_seq, mut rx_quote_seq) = mpsc::channel::<common::QuoteUpdate>(1000);
         let (tx_engine, rx_engine) = mpsc::channel::<AnyUpdate>(5000);
@@ -59,9 +59,10 @@ impl Engine {
                             }
                             AnyUpdate::TradeUpdate(_) => {
                                 let _ = tx_engine.send(update.clone()).await;
-                                let _ = tx_trade_pen.send(update.clone()).await;
+                                let _ = tx_trade_quote_pen.send(update.clone()).await;
                             }
                             AnyUpdate::QuoteUpdate(quote) => {
+                                let _ = tx_trade_quote_pen.send(update.clone()).await;
                                 let _ = tx_quote_vol.send(update.clone()).await;
                                 let _ = tx_quote_seq.send(quote.clone()).await;
                                 // let _ = tx_ws_clone.send(AnyWsUpdate::Quote(quote.clone())).unwrap();
@@ -77,8 +78,7 @@ impl Engine {
         // Create sequencer channels
         let (tx_vol, mut rx_vol) = mpsc::channel::<common::VolatilityUpdate>(1000);
         let (tx_pen, mut rx_pen) = mpsc::channel::<common::PenetrationUpdate>(1000);
-        let (tx_quote, mut rx_quote) = mpsc::channel::<common::QuoteUpdate>(1000);
-        let (tx_strategy, mut rx_strategy) = mpsc::channel::<common::AvellanedaInput>(1000);
+        let (tx_strategy, mut rx_strategy) = mpsc::channel::<common::StrategyInput>(1000);
 
         // Spawn engine tasks
         tokio::spawn(run_tick_volatility_sample_ema(
@@ -94,7 +94,7 @@ impl Engine {
 
         // Spawn penetration analyzer
         tokio::spawn(penetration::engine(
-            rx_trade_pen,
+            rx_trade_quote_pen,
             tx_pen,
             // book_state.clone(),
             120, //window_len
@@ -108,7 +108,7 @@ impl Engine {
             500, //interval_ms
             rx_vol,
             rx_pen,
-            rx_quote,
+            rx_quote_seq,
             tx_strategy.clone(),
         ));
 
@@ -169,6 +169,7 @@ impl Engine {
         // Avellaneda strategy
         let mut strategy = AvellanedaStrategy::new(
             "XBTUSDT".to_string(),
+            0.01,  // tick size
             1,    // quote size
             100,   // max position
             0.1,   // gamma
@@ -178,7 +179,7 @@ impl Engine {
         
         // Spawn strategy runner
         tokio::spawn(run_strategy(strategy,
-                tx_ws.subscribe(), //Receiver <AnyWsUpdate>
+                rx_strategy, //Receiver <StrategyInput>
                 tx_exec.subscribe(), // Receiver <ExecutionEvent>
                 tx_order, // Sender <Order>
                 )

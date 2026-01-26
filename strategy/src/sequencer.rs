@@ -1,4 +1,4 @@
-use common::{VolatilityUpdate, PenetrationUpdate, QuoteUpdate, AvellanedaInput};
+use common::{VolatilityUpdate, PenetrationUpdate, QuoteUpdate, StrategyInput,AvellanedaInput};
 use tokio::sync::{mpsc,mpsc::error};
 use std::collections::BTreeMap;
 // use anyhow::Result;
@@ -8,32 +8,33 @@ struct SequencerState {
     interval_ms: i64,
     vol: BTreeMap<i64, f64>,                        // (interval, sigma)
     pen: BTreeMap<i64, (Option<f64>, Option<f64>)>, // (interval, (A, k))
-    latest_mid: BTreeMap<i64, (i64, f64)>,             // (interval, (ts_received, mid))
+    latest_quote: BTreeMap<i64, (i64, QuoteUpdate)>,             // (interval, (ts_received, Quote))
     last_emitted: Option<i64>,
 }
 // TODO:Storing quotes in BTreeMap seems overkill here. Maybe derive interval size
 // from the volatility/penetration updates and store only the latest quote per interval?
-pub fn try_emit(state: &mut SequencerState) -> Option<AvellanedaInput> {
+pub fn try_emit(state: &mut SequencerState) -> Option<StrategyInput> {
     if let Some((&interval, &sigma)) = state.vol.iter().next() {
         if let Some(&(A, k)) = state.pen.get(&interval) {
             let frontier_ts = interval;
-            // Get latest mid in interval
-            if let Some((ts,mid)) = state.latest_mid.get(&frontier_ts) {
+            // Get latest quote in interval
+            if let Some((ts,q)) = state.latest_quote.get(&frontier_ts) {
+                println!("vol, pen and quote interval {}",frontier_ts);
                 // Emit output
                 let sequenced_output = AvellanedaInput{
                     ts_interval: interval as u64,
-                    quote_ts: *ts as u64,
+                    quote: q.clone(),
                     sigma,
                     A,
                     k,
-                    mid: *mid,
                 };
                 // remove used entries
                 state.vol.remove(&interval);
                 state.pen.remove(&interval);
-                state.latest_mid.remove(&frontier_ts);                
+                state.latest_quote.remove(&frontier_ts);                
 
-                return Some(sequenced_output);
+                state.last_emitted = Some(interval);
+                return Some(StrategyInput::Avellaneda(sequenced_output));
             }
         }
     }
@@ -45,17 +46,18 @@ pub async fn sequencer_run(
     mut vol_rx: mpsc::Receiver<VolatilityUpdate>,
     mut pen_rx: mpsc::Receiver<PenetrationUpdate>,
     mut quote_rx: mpsc::Receiver<QuoteUpdate>,
-    strategy_tx: mpsc::Sender<AvellanedaInput>,
-) -> Result<(), error::SendError<AvellanedaInput>> {
+    strategy_tx: mpsc::Sender<StrategyInput>,
+) -> Result<(), error::SendError<StrategyInput>> {
     let mut state = SequencerState {
         interval_ms,
         vol: BTreeMap::new(),
         pen: BTreeMap::new(),
-        latest_mid: BTreeMap::new(),
+        latest_quote: BTreeMap::new(),
         last_emitted: None,
     };
     let mut vol_interval_checked = false;
     let mut pen_interval_checked = false;
+    let us_per_ms = 1000;
 
     loop {
         tokio::select! {
@@ -82,25 +84,25 @@ pub async fn sequencer_run(
                 }
             }
             Some(q) = quote_rx.recv() => {
-                if let (Some(bid), Some(ask)) = (q.best_bid, q.best_ask) {
-                    let mid = (bid + ask ) / 2.0;
-                    let interval_id = q.ts_received - (q.ts_received % state.interval_ms);
-                    if let Some((existing_ts, _)) = state.latest_mid.get(&interval_id) {
-                        // Update only if newer quote
-                        if q.ts_received > *existing_ts {
-                            state.latest_mid.insert(interval_id, (q.ts_received, mid));
-                        }
-                    } else {
-                        // No existing quote, insert new
-                        state.latest_mid.insert(interval_id, (q.ts_received, mid));
+                let interval_id = q.ts_received - (q.ts_received % (state.interval_ms * us_per_ms));
+                if let Some((existing_ts, _)) = state.latest_quote.get(&interval_id) {
+                    // Update only if newer quote
+                    if q.ts_received > *existing_ts {
+                        state.latest_quote.insert(interval_id, (q.ts_received, q));
                     }
+                } else {
+                    // No existing quote, insert new
+                    state.latest_quote.insert(interval_id, (q.ts_received, q));
                 }
+                
             }
         }
-
         while let Some(output) = try_emit(&mut state) {
-            strategy_tx.send(output).await?;
-            state.last_emitted = Some(output.ts_interval as i64);
+            println!("Sequencer emitting output for interval {}", match &output {
+                StrategyInput::Avellaneda(av) => av.ts_interval,
+                _ => 0,
+            });
+            strategy_tx.send(output.clone()).await?;
         }
     }
     Ok(())
@@ -115,8 +117,21 @@ mod tests {
             interval_ms: 10,
             vol: BTreeMap::new(),
             pen: BTreeMap::new(),
-            latest_mid: BTreeMap::new(),
+            latest_quote: BTreeMap::new(),
             last_emitted: None,
+        }
+    }
+    fn make_quote(ts_received: i64, best_bid: f64, best_ask: f64) -> QuoteUpdate {
+        QuoteUpdate {
+            exchange: "TestExchange".to_string(),
+            base: "TEST".to_string(),
+            quote: "USD".to_string(),
+            best_bid: Some(best_bid),
+            best_ask: Some(best_ask),
+            ts_received,
+            ts_exchange: Some(ts_received - 5),
+            tick_size: 0.01,
+            fee: "0.001".to_string(),
         }
     }
 
@@ -131,32 +146,136 @@ mod tests {
         state.pen.insert(90, (Some(1.2), Some(0.8)));
 
         // quotes arrive out of order (future first)
-        state.latest_mid.insert(90, (91, 80.0));
-        state.latest_mid.insert(100, (105, 105.0));
-        state.latest_mid.insert(90, (99, 99.0));
-        state.latest_mid.insert(150, (150, 150.0));
+        state.latest_quote.insert(90, (91, make_quote(91, 80.0, 80.0)));
+        state.latest_quote.insert(100, (105, make_quote(105, 105.0, 105.0)));
+        state.latest_quote.insert(90, (99, make_quote(99, 99.0, 99.0)));
+        state.latest_quote.insert(150, (150, make_quote(150, 150.0, 150.0)));
 
-        let out = try_emit(&mut state).expect("should emit");
+        if let StrategyInput::Avellaneda(out) = try_emit(&mut state).expect("should emit") {
 
-        // The key assertion:
-        // quote-99 must be selected, not 105 or 150
-        assert_eq!(out.ts_interval, 90);
-        assert_eq!(out.quote_ts, 99);
-        assert_eq!(out.mid, 99.0);
+            // The key assertion:
+            // quote-99 must be selected, not 105 or 150
+            assert_eq!(out.ts_interval, 90);
+            assert_eq!(out.quote.ts_received, 99);
 
-        // And the strategy parameters must match
-        assert_eq!(out.sigma, 0.5);
-        assert_eq!(out.A, Some(1.2));
-        assert_eq!(out.k, Some(0.8));
+            // And the strategy parameters must match
+            assert_eq!(out.sigma, 0.5);
+            assert_eq!(out.A, Some(1.2));
+            assert_eq!(out.k, Some(0.8));
 
-        // State must be advanced correctly
+            // State must be advanced correctly
+            assert!(state.vol.is_empty());
+            assert!(state.pen.is_empty());
+
+            // Quote >= frontier (100) must remain
+            assert_eq!(state.latest_quote.get(&150).unwrap().1.ts_received, 150);
+            assert_eq!(state.latest_quote.get(&100).unwrap().1.ts_received, 105);
+            assert!(state.latest_quote.get(&90).is_none());
+
+        } else {
+            panic!("expected Avellaneda output");
+        }
+    }
+    #[test]
+    fn does_not_emit_until_quote_for_interval_arrives() {
+        let mut state = make_state();
+
+        // interval = 90
+        state.vol.insert(90, 0.7);
+        state.pen.insert(90, (Some(2.0), Some(1.1)));
+
+        // Only future-interval quotes arrive (no quote for interval 90 yet)
+        state.latest_quote.insert(100, (105, make_quote(105, 105.0, 105.0)));
+        state.latest_quote.insert(150, (150, make_quote(150, 150.0, 150.0)));
+
+        // Must NOT emit yet
+        assert!(
+            try_emit(&mut state).is_none(),
+            "sequencer must not emit without a quote for the interval"
+        );
+
+        // Now a valid quote for interval 90 arrives
+        state.latest_quote.insert(90, (99, make_quote(99, 99.0, 99.0)));
+
+        let out = try_emit(&mut state).expect("should emit now");
+
+        if let StrategyInput::Avellaneda(av) = out {
+            assert_eq!(av.ts_interval, 90);
+            assert_eq!(av.quote.ts_received, 99);
+            assert_eq!(av.sigma, 0.7);
+            assert_eq!(av.A, Some(2.0));
+            assert_eq!(av.k, Some(1.1));
+        } else {
+            panic!("expected Avellaneda output");
+        }
+
+        // State must be consumed correctly
         assert!(state.vol.is_empty());
         assert!(state.pen.is_empty());
 
-        // Mid >= frontier (100) must remain
-        assert_eq!(state.latest_mid.get(&150), Some(&(150, 150.0)));
-        assert_eq!(state.latest_mid.get(&100), Some(&(105, 105.0)));
-        assert!(state.latest_mid.get(&90).is_none());
+        // Future quotes must remain untouched
+        assert!(state.latest_quote.contains_key(&100));
+        assert!(state.latest_quote.contains_key(&150));
     }
+    #[test]
+    fn emits_multiple_intervals_in_order_without_cross_contamination() {
+        let mut state = make_state();
+
+        // Insert vol + pen for three intervals (out of order)
+        state.vol.insert(100, 1.0);
+        state.vol.insert(90, 0.5);
+        state.vol.insert(110, 1.5);
+
+        state.pen.insert(100, (Some(2.0), Some(1.0)));
+        state.pen.insert(90, (Some(1.2), Some(0.8)));
+        state.pen.insert(110, (Some(2.5), Some(1.2)));
+
+        // Insert quotes in adversarial order
+        state.latest_quote.insert(110, (115, make_quote(115, 110.0, 110.0)));
+        state.latest_quote.insert(100, (105, make_quote(105, 100.0, 100.0)));
+        state.latest_quote.insert(90, (99, make_quote(99, 90.0, 90.0)));
+
+        // ---- Emit interval 90 ----
+        let out1 = try_emit(&mut state).expect("should emit interval 90");
+        match out1 {
+            StrategyInput::Avellaneda(av) => {
+                assert_eq!(av.ts_interval, 90);
+                assert_eq!(av.quote.ts_received, 99);
+                assert_eq!(av.sigma, 0.5);
+            }
+            _ => panic!("expected Avellaneda"),
+        }
+
+        // ---- Emit interval 100 ----
+        let out2 = try_emit(&mut state).expect("should emit interval 100");
+        match out2 {
+            StrategyInput::Avellaneda(av) => {
+                assert_eq!(av.ts_interval, 100);
+                assert_eq!(av.quote.ts_received, 105);
+                assert_eq!(av.sigma, 1.0);
+            }
+            _ => panic!("expected Avellaneda"),
+        }
+
+        // ---- Emit interval 110 ----
+        let out3 = try_emit(&mut state).expect("should emit interval 110");
+        match out3 {
+            StrategyInput::Avellaneda(av) => {
+                assert_eq!(av.ts_interval, 110);
+                assert_eq!(av.quote.ts_received, 115);
+                assert_eq!(av.sigma, 1.5);
+            }
+            _ => panic!("expected Avellaneda"),
+        }
+
+        // ---- No more emissions ----
+        assert!(try_emit(&mut state).is_none());
+
+        // ---- Final state must be clean ----
+        assert!(state.vol.is_empty());
+        assert!(state.pen.is_empty());
+        assert!(state.latest_quote.is_empty());
+    }
+
 }
 

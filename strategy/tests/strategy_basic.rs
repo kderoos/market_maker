@@ -1,5 +1,5 @@
 use strategy::{traits::Strategy,runner::run_strategy};
-use common::{AnyWsUpdate, TradeUpdate,Order, ExecutionEvent, OrderSide};
+use common::{StrategyInput, TradeUpdate,Order, ExecutionEvent, OrderSide};
 use tokio::sync::broadcast;
 
 #[derive(Default, Clone, Debug)]
@@ -8,12 +8,12 @@ struct TestStrategy {
     pub seen_fills: usize,
 }
 impl Strategy for TestStrategy {
-    fn on_market(&mut self, update: &AnyWsUpdate) -> Vec<Order> {
+    fn on_market(&mut self, update: &StrategyInput) -> Vec<Order> {
         self.seen_market += 1;
 
         // For testing: produce a single order if trade price > 100
         match update {
-            AnyWsUpdate::Trade(t) if t.price > 100.0 => vec![
+            StrategyInput::Trade(t) if t.price > 100.0 => vec![
                 Order::Limit {
                     symbol: t.base.clone()+&t.quote,
                     side: OrderSide::Buy,
@@ -66,7 +66,7 @@ async fn test_strategy_market() {
         ts_exchange: Some(1234567888),
         ts_received: 1234567890,
     };
-    let market_update = AnyWsUpdate::Trade(trade_update);
+    let market_update = StrategyInput::Trade(trade_update);
     let orders = strat.on_market(&market_update);
     // Verify market update was counted
     assert_eq!(strat.seen_market, 1);

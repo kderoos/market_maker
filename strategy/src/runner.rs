@@ -1,17 +1,17 @@
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast,mpsc};
 use tokio;
 use crate::traits::Strategy;
-use common::{AnyWsUpdate, Order, ExecutionEvent};
+use common::{StrategyInput,AnyWsUpdate, Order, ExecutionEvent};
 
 pub async fn run_strategy<S: Strategy + 'static>(
     mut strategy: S,
-    mut rx_market: broadcast::Receiver<AnyWsUpdate>,
+    mut rx_market: mpsc::Receiver<StrategyInput>,
     mut rx_exec: broadcast::Receiver<ExecutionEvent>,
     tx_order: broadcast::Sender<Order>,
 ) {
     loop {
         tokio::select! {
-            Ok(update) = rx_market.recv() => {
+            Some(update) = rx_market.recv() => {
                 for order in strategy.on_market(&update) {
                     let _ = tx_order.send(order);
                 }

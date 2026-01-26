@@ -170,6 +170,10 @@ pub async fn engine(
     let mut next_interval_ts: Option<i64> = None;
     let mut last_midprice_tick: Option<u64> = None;
 
+    let us_per_ms = 1000;
+    let interval_us = interval_ms * us_per_ms;
+
+
     println!("Penetration engine started for symbol {}", symbol);
 
     while let Some(update) = rx.recv().await {
@@ -189,15 +193,15 @@ pub async fn engine(
                 // Initialize clock if first event was trade
                 if next_interval_ts.is_none() {
                     let interval_start = 
-                        ( trade.ts_received / interval_ms ) * interval_ms;
-                    next_interval_ts = Some(interval_start + interval_ms);
+                        ( trade.ts_received / interval_us ) * interval_us;
+                    next_interval_ts = Some(interval_start + interval_us);
                 }
 
                 // Catch up across all crossed intervals
                 while trade.ts_received >= next_interval_ts.unwrap() {
                     let mut last = aggregator.current.collect_and_reset(mid_price_tick);
                     last.timestamp = next_interval_ts.unwrap() as u64;
-                    next_interval_ts = Some( next_interval_ts.unwrap() + interval_ms);
+                    next_interval_ts = Some( next_interval_ts.unwrap() + interval_us);
 
                     _ = aggregator.rotate_aggregate(last.clone());
 
@@ -209,8 +213,7 @@ pub async fn engine(
                             fit_A: Some(A),
                             fit_k: Some(k),
                         };
-
-                        let _ = tx_ws.send(pen_update);
+                        let _ = tx_ws.send(pen_update).await;
                     }
                 }
             }
@@ -223,8 +226,8 @@ pub async fn engine(
                     // Initialize next_interval_ts on first quote or first trade
                     if next_interval_ts.is_none() {
                         let interval_start = 
-                            ( quote.ts_received / interval_ms ) * interval_ms;
-                        next_interval_ts = Some(interval_start + interval_ms);
+                            ( quote.ts_received / interval_us ) * interval_us;
+                        next_interval_ts = Some(interval_start + interval_us);
                     }
 
                 }

@@ -29,7 +29,7 @@ pub struct BookEntry {
     pub price: f64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone,Serialize, Deserialize)]
 pub struct QuoteUpdate {
     pub exchange: String,
     pub base: String,

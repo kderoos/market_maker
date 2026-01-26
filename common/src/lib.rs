@@ -7,14 +7,18 @@ use tokio::sync::mpsc;
 use tokio::sync::broadcast;
 use std::path::PathBuf;
 
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct AvellanedaInput {
     pub ts_interval: u64,
-    pub quote_ts: u64,
+    pub quote: QuoteUpdate,
     pub sigma: f64,
     pub A: Option<f64>,
     pub k: Option<f64>,
-    pub mid: f64,
+}
+#[derive(Debug,Clone, Serialize)]
+pub enum StrategyInput {
+    Avellaneda(AvellanedaInput),
+    Trade(TradeUpdate),
 }
 
 #[derive(Debug, Clone)]
