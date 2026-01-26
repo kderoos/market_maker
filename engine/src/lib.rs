@@ -15,7 +15,7 @@ use connectors_bitmex::BitmexConnector;
 use connectors_bitvavo::BitvavoConnector;
 use connectors_tardis::TardisConnector;
 use utils::forward::ws_forward_trade_quote;
-use strategy::{runner::run_strategy, avellaneda::AvellanedaStrategy};
+use strategy::{sequencer,runner::run_strategy, avellaneda::AvellanedaStrategy};
 use position::run_position_engine;
 
 use std::path::PathBuf;
@@ -41,9 +41,8 @@ impl Engine {
         let (tx_trade_exe, rx_trade_exe) = mpsc::channel::<AnyUpdate>(2000);
         let (tx_trade_pen, rx_trade_pen) = mpsc::channel::<AnyUpdate>(2000);
         let (tx_quote_vol, rx_quote_vol) = mpsc::channel::<AnyUpdate>(2000);
+        let (tx_quote_seq, mut rx_quote_seq) = mpsc::channel::<common::QuoteUpdate>(1000);
         let (tx_engine, rx_engine) = mpsc::channel::<AnyUpdate>(5000);
-        // Strategy input broadcast for now.
-        let (tx_strategy, rx_strategy) = broadcast::channel::<AnyWsUpdate>(1000); 
 
         let book_state = Arc::new(RwLock::new(OrderBook::default()));
         // Fan out rx_exchange to multiple engines
@@ -64,7 +63,8 @@ impl Engine {
                             }
                             AnyUpdate::QuoteUpdate(quote) => {
                                 let _ = tx_quote_vol.send(update.clone()).await;
-                                let _ = tx_ws_clone.send(AnyWsUpdate::Quote(quote.clone())).unwrap();
+                                let _ = tx_quote_seq.send(quote.clone()).await;
+                                // let _ = tx_ws_clone.send(AnyWsUpdate::Quote(quote.clone())).unwrap();
                             }
                         }
                     }
@@ -74,12 +74,18 @@ impl Engine {
                 }
             }
         });
+        // Create sequencer channels
+        let (tx_vol, mut rx_vol) = mpsc::channel::<common::VolatilityUpdate>(1000);
+        let (tx_pen, mut rx_pen) = mpsc::channel::<common::PenetrationUpdate>(1000);
+        let (tx_quote, mut rx_quote) = mpsc::channel::<common::QuoteUpdate>(1000);
+        let (tx_strategy, mut rx_strategy) = mpsc::channel::<common::AvellanedaInput>(1000);
+
         // Spawn engine tasks
         tokio::spawn(run_tick_volatility_sample_ema(
             rx_quote_vol,
-            tx_ws.clone(),
+            tx_vol,
             500, //window_len (ticks)
-            0.100, //interval_s
+            0.500, //interval_s
             2.0, //ema_half_life (s)
             None, //sigma_min
             None, //sigma_max
@@ -89,36 +95,46 @@ impl Engine {
         // Spawn penetration analyzer
         tokio::spawn(penetration::engine(
             rx_trade_pen,
-            tx_ws.clone(),
-            book_state.clone(),
+            tx_pen,
+            // book_state.clone(),
             120, //window_len
             500, //num_bins
             500, //interval_ms
             "XBTUSDT".to_string(),
         ));
+
+        // Spawn sequencer
+        tokio::spawn(sequencer::sequencer_run(
+            500, //interval_ms
+            rx_vol,
+            rx_pen,
+            rx_quote,
+            tx_strategy.clone(),
+        ));
+
         // // Forward trade, quote from rx_exchange to tx_ws
         // tokio::spawn(ws_forward_trade_quote(
         //     tx_exchange.subscribe(),
         //     tx_ws.clone(),
         // ));
 
-        // Spawn book engine
-        let book_state_clone = book_state.clone();
-        tokio::spawn(book_engine(
-            rx_engine,
-            book_state_clone,
-        ));
+        // // Spawn book engine
+        // let book_state_clone = book_state.clone();
+        // tokio::spawn(book_engine(
+        //     rx_engine,
+        //     book_state_clone,
+        // ));
 
-        // spawn execution engine
+        // // spawn execution engine
         let (tx_exec, _) = broadcast::channel(100);
         let (tx_order,_) = broadcast::channel(100);
-        let book_state_exec = book_state.clone();
-        tokio::spawn(execution::run(
-            book_state_exec,
-            tx_ws.subscribe(), // Receiver <AnyWsUpdate>
-            tx_order.subscribe(), //Receiver <Order>
-            tx_exec.clone(), // Sender <ExecutionEvent>
-        ));
+        // let book_state_exec = book_state.clone();
+        // tokio::spawn(execution::run(
+        //     book_state_exec,
+        //     tx_ws.subscribe(), // Receiver <AnyWsUpdate>
+        //     tx_order.subscribe(), //Receiver <Order>
+        //     tx_exec.clone(), // Sender <ExecutionEvent>
+        // ));
 
         // // Spawn connectors
         let data_root = "/opt/tardisData/datasets/".to_string();
@@ -159,6 +175,8 @@ impl Engine {
             0.2,   // delta
             0.1,   // xi
         );
+        
+        // Spawn strategy runner
         tokio::spawn(run_strategy(strategy,
                 tx_ws.subscribe(), //Receiver <AnyWsUpdate>
                 tx_exec.subscribe(), // Receiver <ExecutionEvent>

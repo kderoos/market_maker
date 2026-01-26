@@ -7,5 +7,5 @@ edition = "2024"
 utils = { version = "0.1.0", path = "../utils" }
 common = { version = "0.1.0", path = "../common" }
 ta = "0.5.0"
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1", features = ["full","sync"] }
 

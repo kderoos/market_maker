@@ -158,9 +158,9 @@ impl PenetrationAggregator {
 use tokio::sync::mpsc;
 pub async fn engine(
     mut rx: mpsc::Receiver<AnyUpdate>, 
-    tx_ws: Sender<AnyWsUpdate>,
+    tx_ws: mpsc::Sender<PenetrationUpdate>,
     // mut aggregator: PenetrationAggregator,
-    book_state: Arc<RwLock<OrderBook>>, 
+    // book_state: Arc<RwLock<OrderBook>>, 
     window_len: usize,
     num_bins: usize,
     interval_ms: i64,
@@ -202,7 +202,7 @@ pub async fn engine(
                     _ = aggregator.rotate_aggregate(last.clone());
 
                     if let Ok((A,k)) = aggregator.fit_exponential(){
-                        let depth_snapshot = PenetrationUpdate {
+                        let pen_update = PenetrationUpdate {
                             timestamp: last.timestamp.clone(),
                             symbol: symbol.clone(),
                             counts: aggregator.aggregated_counts.clone().as_vec(), // Keep Counts implementation local.
@@ -210,8 +210,7 @@ pub async fn engine(
                             fit_k: Some(k),
                         };
 
-                        let ws_update = AnyWsUpdate::Penetration(depth_snapshot);
-                        let _ = tx_ws.send(ws_update);
+                        let _ = tx_ws.send(pen_update);
                     }
                 }
             }

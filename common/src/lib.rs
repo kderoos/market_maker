@@ -7,6 +7,16 @@ use tokio::sync::mpsc;
 use tokio::sync::broadcast;
 use std::path::PathBuf;
 
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct AvellanedaInput {
+    pub ts_interval: u64,
+    pub quote_ts: u64,
+    pub sigma: f64,
+    pub A: Option<f64>,
+    pub k: Option<f64>,
+    pub mid: f64,
+}
+
 #[derive(Debug, Clone)]
 pub struct TardisPaths {
     pub trades: PathBuf,
@@ -131,6 +141,7 @@ pub enum AnyWsUpdate {
     TradeCandle(Candle),
     MidPrice(MidPriceUpdate),
     Volatility(VolatilityUpdate),
+    SequencedInput(AvellanedaInput),
 }
 //Traits required by HashSet
 #[derive(Hash, Eq, PartialEq, Clone, Debug)]

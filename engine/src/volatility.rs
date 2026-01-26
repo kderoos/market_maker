@@ -253,7 +253,7 @@ use utils::ewma;
 /// - This function does not use wall-clock timers and is safe for replay
 pub async fn run_tick_volatility_sample_ema(
     mut rx: mpsc::Receiver<AnyUpdate>,
-    tx_strategy: Sender<AnyWsUpdate>,
+    tx_strategy: mpsc::Sender<VolatilityUpdate>,
     window_len: usize,
     interval_sec: f64,
     ema_half_life: f64,
@@ -317,11 +317,11 @@ pub async fn run_tick_volatility_sample_ema(
 
             sigma_ewma = sigma;
 
-            tx_strategy.send(AnyWsUpdate::Volatility(VolatilityUpdate {
+            tx_strategy.send(VolatilityUpdate {
                 symbol: symbol.clone(),
                 sigma,
                 timestamp: next_publish_ts.unwrap(),
-            })).ok();
+            }).await.ok();
 
             next_publish_ts = Some(next_publish_ts.unwrap() + interval_us);
         }
@@ -538,7 +538,7 @@ mod tests {
     #[tokio::test]
     async fn test_publishes_on_interval_boundaries() {
         let (tx_in, rx_in) = mpsc::channel(16);
-        let (tx_out, mut rx_out) = broadcast::channel(16);
+        let (tx_out, mut rx_out) = mpsc::channel::<VolatilityUpdate>(16);
 
         tokio::spawn(run_tick_volatility_sample_ema(
             rx_in,
@@ -559,11 +559,11 @@ mod tests {
         tx_in.send(quote(2_100_000, 100.2, 100.2, "TEST")).await.unwrap();
 
         let mut vols = vec![];
-        while let Ok(Ok(update)) =
+        while let Ok(Some(update)) =
             timeout(Duration::from_millis(50), rx_out.recv()).await
         {
-            if let AnyWsUpdate::Volatility(v) = update {
-                vols.push(v.timestamp);
+            if let VolatilityUpdate { timestamp, .. } = update {
+                vols.push(timestamp);
             }
         }
 
@@ -573,7 +573,7 @@ mod tests {
     #[tokio::test]
     async fn test_multi_interval_catch_up() {
         let (tx_in, rx_in) = mpsc::channel(16);
-        let (tx_out, mut rx_out) = broadcast::channel(16);
+        let (tx_out, mut rx_out) = mpsc::channel::<VolatilityUpdate>(16);
 
         tokio::spawn(run_tick_volatility_sample_ema(
             rx_in,
@@ -593,10 +593,10 @@ mod tests {
         tx_in.send(quote(6_000_000, 100.5, 100.5, "TEST")).await.unwrap();
 
         let mut count = 0;
-        while let Ok(Ok(update)) =
+        while let Ok(Some(update)) =
             timeout(Duration::from_millis(50), rx_out.recv()).await
         {
-            if let AnyWsUpdate::Volatility(_) = update {
+            if let VolatilityUpdate { sigma, .. } = update {
                 count += 1;
             }
         }
@@ -607,7 +607,7 @@ mod tests {
     #[tokio::test]
     async fn test_ewma_decay_without_quotes() {
         let (tx_in, rx_in) = mpsc::channel(16);
-        let (tx_out, mut rx_out) = broadcast::channel(16);
+        let (tx_out, mut rx_out) = mpsc::channel::<VolatilityUpdate>(16);
 
         tokio::spawn(run_tick_volatility_sample_ema(
             rx_in,
@@ -626,8 +626,8 @@ mod tests {
 
         let mut sigmas = vec![];
         while let Ok(update) = rx_out.try_recv() {
-            if let AnyWsUpdate::Volatility(v) = update {
-                sigmas.push(v.sigma);
+            if let VolatilityUpdate { sigma, .. } = update {
+                sigmas.push(sigma);
             }
         }
 
@@ -640,7 +640,7 @@ mod tests {
     #[tokio::test]
     async fn test_sigma_clipping() {
         let (tx_in, rx_in) = mpsc::channel(16);
-        let (tx_out, mut rx_out) = broadcast::channel(16);
+        let (tx_out, mut rx_out) = mpsc::channel::<VolatilityUpdate>(16);
     
         tokio::spawn(run_tick_volatility_sample_ema(
             rx_in,
@@ -658,9 +658,9 @@ mod tests {
         tx_in.send(quote(2_000_000, 120.0, 120.0, "TEST")).await.unwrap();
     
         while let Ok(update) = rx_out.try_recv() {
-            if let AnyWsUpdate::Volatility(v) = update {
-                assert!(v.sigma >= 0.1);
-                assert!(v.sigma <= 0.2);
+            if let VolatilityUpdate { sigma, .. } = update {
+                assert!(sigma >= 0.1);
+                assert!(sigma <= 0.2);
             }
         }
     }
