@@ -8,36 +8,50 @@ struct SequencerState {
     interval_ms: i64,
     vol: BTreeMap<i64, f64>,                        // (interval, sigma)
     pen: BTreeMap<i64, (Option<f64>, Option<f64>)>, // (interval, (A, k))
-    latest_quote: BTreeMap<i64, (i64, QuoteUpdate)>,             // (interval, (ts_received, Quote))
+    latest_quote: BTreeMap<i64, (i64, QuoteUpdate)>,// (interval, (ts_received, Quote))
     last_emitted: Option<i64>,
 }
-// TODO:Storing quotes in BTreeMap seems overkill here. Maybe derive interval size
-// from the volatility/penetration updates and store only the latest quote per interval?
-pub fn try_emit(state: &mut SequencerState) -> Option<StrategyInput> {
-    if let Some((&interval, &sigma)) = state.vol.iter().next() {
-        if let Some(&(A, k)) = state.pen.get(&interval) {
-            let frontier_ts = interval;
-            // Get latest quote in interval
-            if let Some((ts,q)) = state.latest_quote.get(&frontier_ts) {
-                println!("vol, pen and quote interval {}",frontier_ts);
-                // Emit output
-                let sequenced_output = AvellanedaInput{
-                    ts_interval: interval as u64,
-                    quote: q.clone(),
-                    sigma,
-                    A,
-                    k,
-                };
-                // remove used entries
-                state.vol.remove(&interval);
-                state.pen.remove(&interval);
-                state.latest_quote.remove(&frontier_ts);                
+fn prune_below_frontier(state: &mut SequencerState) {
+    let frontier = match state.last_emitted {
+        Some(t) => t + state.interval_ms,
+        None => return,
+    };
 
-                state.last_emitted = Some(interval);
-                return Some(StrategyInput::Avellaneda(sequenced_output));
-            }
-        }
+    state.vol.retain(|&k, _| k >= frontier);
+    state.pen.retain(|&k, _| k >= frontier);
+    state.latest_quote.retain(|&k, _| k >= frontier);
+}
+pub fn try_emit(state: &mut SequencerState) -> Option<StrategyInput> {
+    for (&interval, &sigma) in state.vol.iter() {
+        let (A, k) = match state.pen.get(&interval) {
+            Some(&(A, k)) => (A, k),
+            None => continue,
+        };
+
+        let (_, q) = match state.latest_quote.get(&interval) {
+            Some(v) => v,
+            None => continue,
+        };
+
+        let output = StrategyInput::Avellaneda(AvellanedaInput {
+            ts_interval: interval as u64,
+            quote: q.clone(),
+            sigma,
+            A,
+            k,
+        });
+
+        state.vol.remove(&interval);
+        state.pen.remove(&interval);
+        state.latest_quote.remove(&interval);
+        state.last_emitted = Some(interval);
+
+        // Keep state small and try_emit efficient.
+        prune_below_frontier(state);
+
+        return Some(output);
     }
+
     None
 }
 
@@ -84,7 +98,8 @@ pub async fn sequencer_run(
                 }
             }
             Some(q) = quote_rx.recv() => {
-                let interval_id = q.ts_received - (q.ts_received % (state.interval_ms * us_per_ms));
+                // Ceiling to nearest interval
+                let interval_id = q.ts_received + (state.interval_ms * us_per_ms) - (q.ts_received % (state.interval_ms * us_per_ms));
                 if let Some((existing_ts, _)) = state.latest_quote.get(&interval_id) {
                     // Update only if newer quote
                     if q.ts_received > *existing_ts {
@@ -276,6 +291,49 @@ mod tests {
         assert!(state.pen.is_empty());
         assert!(state.latest_quote.is_empty());
     }
+    #[test]
+    fn emits_using_latest_quote_at_or_before_interval() {
+        let mut state = make_state();
+
+        let interval = 100;
+
+        // Quote arrives BEFORE the interval boundary
+        state.latest_quote.insert(
+            100,
+            (95, make_quote(95, 95.0, 96.0)),
+        );
+
+        // Future quote (must NOT be used)
+        state.latest_quote.insert(
+            110,
+            (110, make_quote(110, 110.0, 111.0)),
+        );
+
+        // Vol + Pen arrive exactly on interval
+        state.vol.insert(interval, 0.42);
+        state.pen.insert(interval, (Some(1.0), Some(0.5)));
+
+        // This SHOULD emit.
+        let out = try_emit(&mut state).expect("sequencer should emit");
+
+        match out {
+            StrategyInput::Avellaneda(av) => {
+                assert_eq!(av.ts_interval, interval as u64);
+                assert_eq!(av.sigma, 0.42);
+                assert_eq!(av.A, Some(1.0));
+                assert_eq!(av.k, Some(0.5));
+
+                assert_eq!(av.quote.ts_received, 95);
+            }
+            _ => panic!("expected Avellaneda output"),
+        }
+
+        // State must advance
+        assert!(state.vol.is_empty());
+        assert!(state.pen.is_empty());
+
+        // Future quote must remain
+        assert!(state.latest_quote.contains_key(&110));
+    }
 
 }
-

@@ -181,9 +181,48 @@ impl Engine {
         tokio::spawn(run_strategy(strategy,
                 rx_strategy, //Receiver <StrategyInput>
                 tx_exec.subscribe(), // Receiver <ExecutionEvent>
-                tx_order, // Sender <Order>
+                tx_order.clone(), // Sender <Order>
                 )
         );
+        // //Mock execution engine by directly sending executions on order events
+        let mut rx_order = tx_order.subscribe();
+        let tx_exec_clone = tx_exec.clone();
+
+        tokio::spawn(async move {
+            while let Ok(order) = rx_order.recv().await {
+                println!("🧪 Order received (debug exec): {:?}", order);
+            
+                use common::{ExecutionEvent, Order};
+            
+                let (symbol, side, price, size, client_id) = match order {
+                    Order::Limit {
+                        symbol,
+                        side,
+                        price,
+                        size,
+                        client_id,
+                        ..
+                    } => (symbol, side, price, size, client_id),
+                    _ => continue, // only handle limit orders in this mock
+                
+                };
+                let now = chrono::Utc::now().timestamp_micros();
+                let exec = ExecutionEvent {
+                    action: "Fill".to_string(), // important
+                    symbol,
+                    order_id: client_id.unwrap_or(0) as i64,               // mock fill
+                    side,
+                    price,
+                    size,
+                    ts_exchange: Some(now),      // mock fill
+                    ts_received: now,
+                };
+            
+                // broadcast::Sender::send is non-async
+                let _ = tx_exec_clone.send(exec);
+            }
+        });
+
 
         tokio::spawn(run_position_engine(
             tx_exec.subscribe(),
