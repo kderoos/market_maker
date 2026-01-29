@@ -25,6 +25,8 @@ const BID_ID: u64 = 1;
 const ASK_ID: u64 = 2;
 
 pub struct AvellanedaStrategy {
+    // Time
+    ts: i64,
     // Inventory
     position: i64,
     max_position: i64,
@@ -60,6 +62,7 @@ impl AvellanedaStrategy {
         xi: f64,
     ) -> Self {
         Self {
+            ts: 0,
             position: 0,
             quote_size,
             max_position,
@@ -124,6 +127,7 @@ impl Strategy for AvellanedaStrategy {
         println!("Avellaneda Strategy received market update: {:?}", update);
         match update {
             StrategyInput::Avellaneda(av) => {
+                self.ts = av.ts_interval as i64;
                 self.a = av.A;
                 self.k = av.k;
                 self.sigma = Some(av.sigma);
@@ -169,6 +173,7 @@ impl Strategy for AvellanedaStrategy {
                 price: bid,
                 size: self.quote_size,
                 client_id: Some(BID_ID),
+                ts_received: self.ts,
             });
         }
         if self.position > -self.max_position {
@@ -178,6 +183,7 @@ impl Strategy for AvellanedaStrategy {
                 price: ask,
                 size: self.quote_size,
                 client_id: Some(ASK_ID),
+                ts_received: self.ts,
             });            
         }
         // Debug

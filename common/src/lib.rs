@@ -44,7 +44,7 @@ pub struct ExchangeConnectorCommand {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Order {
     Market{ symbol: String, side: OrderSide, size: i64 },
-    Limit{ symbol: String, side: OrderSide, price: f64, size: i64, client_id: Option<u64> },
+    Limit{ symbol: String, side: OrderSide, price: f64, size: i64, client_id: Option<u64>, ts_received: i64 },
     Cancel{ order_id: i64 },
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]

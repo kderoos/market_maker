@@ -20,6 +20,7 @@ impl Strategy for TestStrategy {
                     price: t.price,
                     size: 1,
                     client_id: None,
+                    ts_received: t.ts_received,
                 }
             ],
             _ => Vec::new(),
@@ -72,7 +73,7 @@ async fn test_strategy_market() {
     assert_eq!(strat.seen_market, 1);
     // Verify an order was produced
     assert_eq!(orders.len(), 1);
-    if let Order::Limit{ symbol, side, price, size, client_id } = &orders[0] {
+    if let Order::Limit{ symbol, side, price, size, client_id, ts_received } = &orders[0] {
         assert_eq!(symbol, "BTCUSDT");
         assert_eq!(*side, OrderSide::Buy);
         assert_eq!(*price, 150.0);

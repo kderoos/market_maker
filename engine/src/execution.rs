@@ -1,9 +1,9 @@
 use std::collections::{HashMap, hash_map::Entry};
-use std::sync::{Arc};
+use tokio::sync::mpsc;
 use tokio::sync::RwLock;
 use std::sync::atomic::{AtomicI64, Ordering};
 use tokio::sync::broadcast::{Sender, Receiver};
-use common::{BookEntry, TradeUpdate, Order, OrderSide, AnyWsUpdate, ExecutionEvent};
+use common::{BookEntry, TradeUpdate, Order, OrderSide, AnyWsUpdate, AnyUpdate, BookUpdate, ExecutionEvent};
 use common::OrderSide::{Buy, Sell};
 use crate::book::OrderBook;
 use rand;
@@ -31,7 +31,7 @@ struct RestingOrder {
     qty_remaining: i64,
     size_ahead: i64,  // updated when levels change
 }
-struct ExecutionState {
+pub struct ExecutionState {
     pub tick_size: f64,
     pub bid_orders: HashMap<i64, Vec<RestingOrder>>, // keyed by order id
     pub ask_orders: HashMap<i64, Vec<RestingOrder>>, 
@@ -73,7 +73,7 @@ impl ExecutionState {
     async fn replace_limit(
         &mut self,
         order: Order,
-        orderbook: &Arc<RwLock<OrderBook>>,
+        orderbook: &mut OrderBook,
     ) {
         let client_id = match &order {
             Order::Limit { client_id, .. } => *client_id,
@@ -91,16 +91,16 @@ impl ExecutionState {
         self.place_or_cancel(order, orderbook).await;
     }
 
-    pub async fn place_or_cancel(&mut self, order: Order, orderbook: &Arc<RwLock<OrderBook>>) {
+    pub async fn place_or_cancel(&mut self, order: Order, orderbook: &mut OrderBook) {
         match order {
             Order::Market{ symbol, side, size } => {
                 // Place market order logic
                 unimplemented!();
             }
-            Order::Limit{ symbol, side, price, size, client_id} => {
+            Order::Limit{ symbol, side, price, size, client_id, ts_received } => {
                 if self.tick_size > 0.0 {
                     let key = (price/self.tick_size) as i64;
-                    let ob = orderbook.read().await;
+                    let ob = orderbook;
 
                     let order_id = next_order_id();
                     if let Some(cid) = client_id {
@@ -175,7 +175,7 @@ impl ExecutionState {
             }
         }
     }
-        // Process one price level: mutate orders Vec, consume remaining_trade_size, return fills
+    // Process one price level: mutate orders Vec, consume remaining_trade_size, return fills
     fn process_level(
         orders: &mut Vec<RestingOrder>,
         qty_level: i64,
@@ -234,7 +234,7 @@ impl ExecutionState {
         
         (fills, fill_ids)
     }
-    pub async fn on_trade(&mut self, trade: TradeUpdate, orderbook: &Arc<RwLock<OrderBook>>) -> Vec<ExecutionEvent> {
+    pub async fn on_trade(&mut self, trade: TradeUpdate, orderbook: &OrderBook) -> Vec<ExecutionEvent> {
         if self.tick_size == 0.0 { self.tick_size = trade.tick_size; }
         let trade_price = trade.price;
         let mut remaining_trade_size = trade.size;
@@ -274,8 +274,7 @@ impl ExecutionState {
                         // Trade price matches level — process fills statistically.
                         if remaining_trade_size <= 0 { break; }
                         let qty_level = {
-                            let ob = orderbook.read().await;
-                            ob.asks.entries.get(&key).map_or(0, |lvl| lvl.size)
+                            orderbook.asks.entries.get(&key).map_or(0, |lvl| lvl.size)
                         };
                         if let Some(orders) = self.ask_orders.get_mut(&key) {
                             let (new_fills, fill_ids) = Self::process_level(orders, qty_level, &mut remaining_trade_size, &trade);
@@ -328,8 +327,7 @@ impl ExecutionState {
                     } else {
                         if remaining_trade_size <= 0 { break; }
                         let qty_level = {
-                            let ob = orderbook.read().await;
-                            ob.bids.entries.get(&key).map_or(0, |lvl| lvl.size)
+                            orderbook.bids.entries.get(&key).map_or(0, |lvl| lvl.size)
                         };
                         if let Some(orders) = self.bid_orders.get_mut(&key) {
                             let (new_fills, fill_ids) = Self::process_level(orders, qty_level, &mut remaining_trade_size, &trade);
@@ -357,555 +355,385 @@ impl ExecutionState {
     }
 }
 
-pub async fn run(orderbook: Arc<RwLock<OrderBook>>,
-                 mut trade_rx: Receiver<AnyWsUpdate>,
-                 mut order_rx: Receiver<Order>,
-                 exec_tx: Sender<ExecutionEvent>) {
-    let mut state = ExecutionState::Default();
+struct DeterministicEngine {
+    // market
+    orderbook: OrderBook,          
+    exec: ExecutionState,
+
+    // time
+    book_watermark_ts: i64,         // last applied book/trade timestamp
+
+    // order gating
+    pending_orders: std::collections::VecDeque<(i64, Order)>, // (ts_received, order)
+}
+pub async fn run_deterministic(
+    mut rx_ws: mpsc::Receiver<AnyUpdate>,
+    mut order_rx: mpsc::Receiver<Order>,
+    exec_tx: mpsc::Sender<ExecutionEvent>,
+    latency_ms: i64, // microseconds
+) {
+    let ex_latency = latency_ms * 1000; // to microseconds
+    let mut engine = DeterministicEngine {
+        orderbook: OrderBook::default(),
+        exec: ExecutionState::Default(),
+        book_watermark_ts: 0,
+        pending_orders: std::collections::VecDeque::new(),
+    };
 
     loop {
         tokio::select! {
-            Ok(q) = order_rx.recv() => {
-                state.replace_limit(q,&orderbook).await;
+            Some(update) = rx_ws.recv() => {
+                match update {
+                    AnyUpdate::BookUpdate(book_update) => {
+                        if engine.exec.tick_size == 0.0 {
+                            engine.exec.tick_size = book_update.tick_size;
+                        }
+                        apply_book_update(book_update,&mut engine.orderbook);
+                        engine.book_watermark_ts = engine.orderbook.timestamp;
+                        //
+                        println!("Book updated {:?}, {:?}", engine.orderbook.bids.entries, engine.orderbook.asks.entries);
+                    }
+
+                    AnyUpdate::TradeUpdate(trade) => {
+                        engine.book_watermark_ts =
+                            engine.book_watermark_ts.max(trade.ts_received);
+
+                        println!("Trade received: {:?}", trade);
+                        let fills = engine.exec.on_trade(trade, &engine.orderbook).await;
+                        for fill in fills {
+                            println!("Fill generated: {:?}", fill);
+                            if let Err(e) = exec_tx.send(fill).await {
+                                eprintln!("failed to send execution event: {:?}", e);
+                            }
+                        }
+                    }
+
+                    _ => {}
+                }
+
+                // Try releasing orders after market update
+                release_orders(&mut engine, ex_latency).await;
             }
 
-            Ok(update) = trade_rx.recv() => {
-                match update {
-                    AnyWsUpdate::Trade(trade) => {
-                        let fills = state.on_trade(trade, &orderbook).await;
-                        for fill in fills {
-                            println!("Sent execution event: {:?}", fill.clone());
-                            exec_tx.send(fill).unwrap();
-                        }                       
+            //Buffer incoming orders
+            Some(order) = order_rx.recv() => {
+                match &order {
+                    Order::Market {  .. } => {
+                        unimplemented!("Market orders not supported yet");
+                    }
+                    Order::Limit { ts_received, .. } => {
+                        engine.pending_orders.push_back((*ts_received, order));
+                    }
+                    Order::Cancel { .. } => {
+                        // TODO: remove from pending orders if present
+
+                        // Remove resting order if present.
+                        engine.exec.place_or_cancel(order, &mut engine.orderbook).await;
                     }
                     _ => {}
                 }
+                // Check for orders
+                release_orders(&mut engine, ex_latency).await;
+                println!("Pending orders: {:?}", engine.pending_orders);
+                println!("Resting orders: {:?} {:?}", engine.exec.bid_orders, engine.exec.ask_orders);
             }
         }
     }
 }
-use tokio::sync::oneshot;
-#[cfg(test)]
-mod tests {
-    use super::*;
-    // Shared fixture: returns (orderbook, trade_tx, order_tx, exec_rx, state_arc)
-    async fn setup_execution_engine() -> (
-        Arc<RwLock<OrderBook>>,
-        tokio::sync::broadcast::Sender<TradeUpdate>,
-        tokio::sync::broadcast::Sender<Order>,
-        tokio::sync::broadcast::Receiver<ExecutionEvent>,
-        Arc<RwLock<ExecutionState>>,
-    ) {
-        let orderbook = Arc::new(RwLock::new(OrderBook::default()));
-        let (trade_tx, mut trade_rx) = tokio::sync::broadcast::channel(100);
-        let (order_tx, mut order_rx) = tokio::sync::broadcast::channel(100);
-        let (exec_tx, exec_rx) = tokio::sync::broadcast::channel(100);
-        
-        // Create and share the state
-        let state = Arc::new(RwLock::new(ExecutionState::Default()));
-        let state_clone = state.clone();
-        
-        // Clone orderbook for task
-        let orderbook_clone = orderbook.clone();
-        let exec_tx_clone = exec_tx.clone();
-
-        // Initialize tick_size in state
+// Synchronous function to apply book updates.
+pub fn apply_book_update(book_update: BookUpdate, book_state: &mut OrderBook) {
+        // Process BookUpdate messages
         {
-            let mut s = state.write().await;
-            s.tick_size = 0.01;
-        }
-        // Ready signal for test to ensure task is running
-        // when orders is sent.
-        let (ready_tx, ready_rx) = oneshot::channel();
-        // Spawn the run task with shared state
-        tokio::spawn(async move {
-            // Signal that the task is ready
-            let _ = ready_tx.send(());
-            loop {
-                tokio::select! {
-                    Ok(q) = order_rx.recv() => {
-                        let mut s = state_clone.write().await;
-                        s.replace_limit(q, &orderbook_clone).await;
-                    }
-                    Ok(trade) = trade_rx.recv() => {
-                        let mut s = state_clone.write().await;
-                        let fills = s.on_trade(trade, &orderbook_clone).await;
-                        for fill in fills {
-                            let _ = exec_tx_clone.send(fill);
-                        }
+            let mut state = book_state;
+            // Update the order book state based on the action
+            match book_update.action.as_str() {
+                "insert" => {
+                    for (id, entry) in book_update.data {
+                        let side = if entry.side == "Buy" { &mut state.bids } else { &mut state.asks };
+                        let key = (entry.price/book_update.tick_size) as i64;
+                        side.entries.insert(key, entry);
+                        state.timestamp = book_update.ts_received;
                     }
                 }
+                "update" => {
+                    for (id, entry) in book_update.data {
+                        let side = if entry.side == "Buy" { &mut state.bids } else { &mut state.asks };
+                        let key = (entry.price/book_update.tick_size) as i64;
+                        side.entries.insert(key, entry);
+                    }
+                }
+                "delete" => {
+                    for (id, entry) in book_update.data {
+                        let side = if entry.side == "Buy" { &mut state.bids } else { &mut state.asks };
+                        let key = (entry.price/book_update.tick_size) as i64;
+                        side.entries.remove(&key);
+                    }
+                }
+                "partial" => {
+                    // Replace the entire order book for the symbol
+                    state.bids.entries.clear();
+                    state.asks.entries.clear();
+                    for (id, entry) in book_update.data {
+                        let side = if entry.side == "Buy" { &mut state.bids } else { &mut state.asks };
+                        let key = (entry.price/book_update.tick_size) as i64;
+                        side.entries.insert(key, entry);
+                    }
+                }
+                _ => {
+                    eprintln!("Unknown action: {}", book_update.action);
+                }
             }
-        });
-        _ = ready_rx.await; // wait for task to be ready 
-        (orderbook, trade_tx, order_tx, exec_rx, state)
-    }
-    #[tokio::test]
-    async fn test_execution_engine() {
-        let (orderbook, trade_tx, order_tx, mut exec_rx, state) = setup_execution_engine().await;
-        // create some qty_ahead in order book
-        {
-            let mut ob = orderbook.write().await;
-            ob.asks.entries.insert(5000000, BookEntry {side: "Ask".to_string(), price: 50000.0, size: 0 });
-        }
-        // Place limit buy order
-        order_tx.send(Order::Limit{ symbol: "XBTUSDT".to_string(), side: Sell, price: 50000.0, size: 100, client_id: Some(1)}).unwrap();
-
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await; // allow some time for order to be processed
-        assert_eq!(state.read().await.ask_orders.len(), 1, "there should be one resting order");
-        let s = state.read().await.ask_orders.get(&5000000).unwrap()[0].clone();
-        assert_eq!(s.qty_remaining, 100, "resting order should have full qty");
-        assert_eq!(s.size_ahead, 0, "size_ahead should be zero for deterministic fill");
-
-        trade_tx.send(TradeUpdate {
-           exchange: "mock_ex".to_string(),
-           base: "XBT".to_string(),
-           quote: "USDT".to_string(),
-           tick_size: 0.01,
-           side: Buy,
-           price: 50000.0,
-           size: 100,
-           ts_exchange: Some(chrono::Utc::now().timestamp_micros()),
-           ts_received: chrono::Utc::now().timestamp_micros(),
-        }).unwrap();        
-
-        // Check for execution event
-        let fill = tokio::time::timeout(std::time::Duration::from_secs(3), exec_rx.recv())
-            .await
-            .expect("timeout waiting for execution event")
-            .expect("exec_rx closed");
-
-        assert_eq!(fill.size, 100);
-        assert_eq!(fill.price, 50000.0);
-        
-        // After fill, level should be removed
-        {
-            let s = state.read().await;
-            assert!(s.ask_orders.get(&5000000).is_none(), "order should be removed after full fill");
         }
     }
-    #[tokio::test]
-    async fn test_order_fill_no_more_events() {
-        let (orderbook, trade_tx, order_tx, mut exec_rx, state) = setup_execution_engine().await;
-        // Size ahead zero for deterministic fill
-        {
-            let mut ob = orderbook.write().await;
-            ob.asks.entries.insert(5000000, BookEntry {side: "Ask".to_string(), price: 50000.0, size: 0 });
-        }
-        // Place limit sell order
-        order_tx.send(Order::Limit{ symbol: "XBTUSDT".to_string(), side: Sell, price: 50000.0, size: 100, client_id: Some(1)}).unwrap();
-
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await; // allow some time to process
-
-        trade_tx.send(TradeUpdate {
-           exchange: "mock_ex".to_string(),
-           base: "XBT".to_string(),
-           quote: "USDT".to_string(),
-           tick_size: 0.01,
-           side: Buy,
-           price: 50000.0,
-           size: 100,
-           ts_exchange: Some(chrono::Utc::now().timestamp_micros()),
-           ts_received: chrono::Utc::now().timestamp_micros(),
-        }).unwrap();        
-
-        // Check order filled by trade.
-        let fill = tokio::time::timeout(std::time::Duration::from_secs(3), exec_rx.recv())
-            .await
-            .expect("timeout waiting for execution event")
-            .expect("exec_rx closed");
-        assert_eq!(fill.size, 100);
-    
-        // Now send one more trade at same price — should NOT produce another ExecutionEvent
-        trade_tx.send(TradeUpdate {
-           exchange: "mock_ex".to_string(),
-           base: "XBT".to_string(),
-           quote: "USDT".to_string(),
-           tick_size: 0.01,
-           side: Buy,
-           price: 50000.0,
-           size: 1, 
-           ts_exchange: Some(chrono::Utc::now().timestamp_micros()),
-           ts_received: chrono::Utc::now().timestamp_micros(),
-        }).unwrap();     
-    
-        // try recv with timeout
-        let recv_fut = exec_rx.recv();
-        let res = tokio::time::timeout(std::time::Duration::from_millis(1000), recv_fut).await;
-        assert!(res.is_err(), "expected no further execution event after order removed");
-    }
-    #[tokio::test]
-    async fn test_partial_fill_and_remains() {
-        // Setup test environment
-        let (orderbook, trade_tx, order_tx, mut exec_rx, state) = setup_execution_engine().await;
-
-        // Deterministic fill: Size ahead is zero.
-        {
-            let mut ob = orderbook.write().await;
-            ob.bids.entries.insert(4000000, BookEntry { side: "Bid".to_string(), price: 40000.0, size: 0 });
-        }
-
-        // Place buy order of size 50, first in que.
-        order_tx.send(Order::Limit { symbol: "XBTUSDT".into(), side: Buy, price: 40000.0, size: 50, client_id: Some(1)}).expect("order send failed");
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await; // let task process
-
-        // Verify order was placed
-        {
-            let s = state.read().await;
-            let key = (40000.0 / s.tick_size) as i64;
-            let vec = s.bid_orders.get(&key).expect("order should exist");
-            assert_eq!(vec[0].qty_remaining, 50);
-            assert_eq!(vec[0].qty_total, 50);
-            assert_eq!(vec[0].size_ahead, 0);
-        }
-
-        // Trade smaller than order: 20 -> partial fill
-        let t1 = TradeUpdate {
-            exchange: "mock".into(),
-            base: "XBT".into(),
-            quote: "USDT".into(),
-            tick_size: 0.01,
-            side: Sell,
-            price: 40000.0,
-            size: 20,
-            ts_exchange: Some(chrono::Utc::now().timestamp_micros()),
-            ts_received: chrono::Utc::now().timestamp_micros(),
-        };
-
-        let t1_clone = t1.clone();
-
-        // First trade partially fills
-        trade_tx.send(t1).expect("trade send failed");
-        // Check for execution event
-        let fill1 =  exec_rx.recv()
-            .await
-            .expect("exec_rx closed"); 
-        assert_eq!(fill1.size, 20);
-
-        // Check remaining quantity reduced
-        {
-            let s = state.read().await;
-            let key = (40000.0 / s.tick_size) as i64;
-            let vec = s.bid_orders.get(&key).expect("orders should remain");
-            assert_eq!(vec[0].qty_remaining, 30);
-            assert_eq!(vec[0].qty_total, 50);
-            assert_eq!(vec[0].size_ahead, 0);
-        }
-
-        // Second trade fills the rest deterministically
-        let t2 = TradeUpdate { size: 30, ..t1_clone };
-        {
-            let mut s = state.write().await;
-            let ev2 = s.on_trade(t2, &orderbook).await.pop().expect("should have fill event");
-            assert_eq!(ev2.size, 30);
-        }
-        // Check order removed
-        {
-            let s = state.read().await;
-            let key = (40000.0 / s.tick_size) as i64;
-            let vec = s.bid_orders.get(&key);
-            assert!(vec.is_none(), "order should be removed after full fill");
+async fn release_orders(engine: &mut DeterministicEngine, ex_latency: i64) {
+    while let Some((ts, _)) = engine.pending_orders.front() {
+        if *ts <= engine.book_watermark_ts - ex_latency {
+            let (_, order) = engine.pending_orders.pop_front().unwrap();
+            engine.exec.replace_limit(order, &mut engine.orderbook).await;
+        } else {
+            break;
         }
     }
+}
 
-    #[tokio::test]
-    async fn test_multiple_orders_fifo() {
-        // Setup test environment
-        let (orderbook, trade_tx, order_tx, mut exec_rx, state) = setup_execution_engine().await;
-        // Deterministic fill: Size ahead is zero.
-        {
-            let mut ob = orderbook.write().await;
-            ob.asks.entries.insert(6000000, BookEntry { side: "Ask".to_string(), price: 60000.0, size: 0 });
-        }
-        // Place two buy orders at same price
-        order_tx.send(Order::Limit { symbol: "XBTUSDT".into(), side: Sell, price: 60000.0, size: 30, client_id: Some(1) }).expect("order send failed");
-        order_tx.send(Order::Limit { symbol: "XBTUSDT".into(), side: Sell, price: 60000.0, size: 50, client_id: Some(2) }).expect("order send failed");
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await; // let task process 
-        // Verify both orders were placed
-        {
-            let s = state.read().await;
-            let key = (60000.0 / s.tick_size) as i64;
-            let vec = s.ask_orders.get(&key).expect("orders should exist");
-            assert_eq!(vec.len(), 2, "there should be two resting orders");
-            assert_eq!(vec[0].qty_remaining, 30);
-            assert_eq!(vec[1].qty_remaining, 50);
-        }
-        // Trade of size 40 should fill first order (30) and partially fill second (10)
-        let trade = TradeUpdate {
-            exchange: "mock".into(),
-            base: "XBT".into(),
-            quote: "USDT".into(),
-            tick_size: 0.01,
-            side: Buy,
-            price: 60000.0,
-            size: 40,
-            ts_exchange: Some(chrono::Utc::now().timestamp_micros()),
-            ts_received: chrono::Utc::now().timestamp_micros(),
-        };
-        trade_tx.send(trade).expect("trade send failed");
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await; // let task process
+#[cfg(test)]
+mod deterministic_execution_tests {
+    use super::*;
+    use tokio::sync::mpsc::channel;
+    use chrono::Utc;
+    use common::{
+        AnyUpdate, BookEntry, BookUpdate, ExecutionEvent,
+        Order, OrderSide::{Buy, Sell}, TradeUpdate,
+    };
 
-        // First fill event
-        let fill1 = tokio::time::timeout(std::time::Duration::from_secs(1), exec_rx.recv())
-            .await
-            .expect("timeout waiting for first fill")
-            .expect("exec_rx closed");
-        assert_eq!(fill1.size, 30, "first order should be fully filled");
-
-        // Second fill event
-        let fill2 = tokio::time::timeout(std::time::Duration::from_secs(1), exec_rx.recv())
-            .await
-            .expect("timeout waiting for second fill")
-            .expect("exec_rx closed");
-
-        assert_eq!(fill2.size, 10, "second order should be partially filled");
-        // Check remaining quantity of second order
-        {
-            let s = state.read().await;
-            let key = (60000.0 / s.tick_size) as i64;
-            let vec = s.ask_orders.get(&key).expect("orders should remain");
-            assert_eq!(vec.len(), 1, "one order should remain");
-            assert_eq!(vec[0].qty_remaining, 40, "second order should have 40 remaining");
-        }   
-    }   
-
-    #[tokio::test]
-    async fn test_cancel_removes_order() {
-        let (orderbook, trade_tx, order_tx, mut exec_rx, state) = setup_execution_engine().await;
-
-        {
-            let mut ob = orderbook.write().await;
-            ob.asks.entries.insert(7000000, BookEntry { side: "Ask".to_string(), price: 70000.0, size: 1 });
-        }
-
-        // Place order
-        order_tx.send(Order::Limit { symbol: "XBTUSDT".into(), side: Sell, price: 70000.0, size: 5, client_id: Some(1) }).expect("order send failed");
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-
-        // Get the order ID that was just placed
-        let order_id = {
-            let s = state.read().await;
-            let key = (70000.0 / s.tick_size) as i64;
-            s.ask_orders.get(&key).map(|vec| vec[0].id).expect("order should exist")
-        };
-
-        // Cancel the order via channel
-        order_tx.send(Order::Cancel { order_id }).expect("cancel send failed");
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-
-        // Verify order was cancelled
-        {
-            let s = state.read().await;
-            let key = (70000.0 / s.tick_size) as i64;
-            assert!(s.ask_orders.get(&key).is_none(), "order should be removed after cancel");
-        }
-
-        // Now trade arrives — should not produce fill
-        let trade = TradeUpdate {
-            exchange: "mock".into(),
-            base: "XBT".into(),
-            quote: "USDT".into(),
-            tick_size: 0.01,
-            side: Buy,
-            price: 70000.0,
-            size: 5,
-            ts_exchange: Some(chrono::Utc::now().timestamp_micros()),
-            ts_received: chrono::Utc::now().timestamp_micros(),
-        };
-
-        trade_tx.send(trade).expect("trade send failed");
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-
-        // Timeout — no fill should arrive
-        let recv_fut = exec_rx.recv();
-        let res = tokio::time::timeout(std::time::Duration::from_millis(100), recv_fut).await;
-        assert!(res.is_err(), "expected no execution event after cancel");
+    fn now_us() -> i64 {
+        Utc::now().timestamp_micros()
     }
-    #[tokio::test]
-    async fn test_order_queueing() {
-        //Setup test
-        let (orderbook, trade_tx, order_tx, mut exec_rx, state) = setup_execution_engine().await;
-        // Create order book level with size ahead
-        {
-            let mut ob = orderbook.write().await;
-            ob.asks.entries.insert(8000000, BookEntry { side: "Ask".to_string(), price: 80000.0, size: 180 });
-        }
-        // Place limit buy order
-        order_tx.send(Order::Limit { symbol: "XBTUSDT".into(), side: Sell, price: 80000.0, size: 20, client_id: Some(1) }).expect("order send failed");
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await; // let task process
 
-        // Verify order was placed with correct size_ahead
-        {
-            let s = state.read().await;
-            let key = (80000.0 / s.tick_size) as i64;
-            let vec = s.ask_orders.get(&key).expect("order should exist");
-            assert_eq!(vec[0].qty_remaining, 20);
-            assert_eq!(vec[0].size_ahead, 180);
-        }
-
-        // Trade smaller than size_ahead untill order gets filled
-        for _ in 0..10 {
-            let trade = TradeUpdate {
-                exchange: "mock".into(),
-                base: "XBT".into(),
-                quote: "USDT".into(),
-                tick_size: 0.01,
-                side: Buy,
-                price: 80000.0,
-                size: 20,
-                ts_exchange: Some(chrono::Utc::now().timestamp_micros()),
-                ts_received: chrono::Utc::now().timestamp_micros(),
-            };
-            trade_tx.send(trade).expect("trade send failed");
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await; // let task process
-        }
-        // Check for execution event
-        let fill = tokio::time::timeout(std::time::Duration::from_secs(3), exec_rx.recv())
-            .await
-            .expect("timeout waiting for execution event")
-            .expect("exec_rx closed");
-        assert_eq!(fill.size, 20, "order should be filled after sufficient trades");
+    struct Harness {
+        ws_tx: mpsc::Sender<AnyUpdate>,
+        order_tx: mpsc::Sender<Order>,
+        exec_rx: mpsc::Receiver<ExecutionEvent>,
     }
-    #[tokio::test]
-    async fn fill_all_order_trade_crossed_level() {
-        //setup test
-        let (orderbook, trade_tx, order_tx, mut exec_rx, state) = setup_execution_engine().await;
-        // Create order book level with size ahead
-        {
-            let mut ob = orderbook.write().await;
-            ob.asks.entries.insert(9000000, BookEntry { side: "Ask".to_string(), price: 90000.0, size: 100 });
-        }
-        // Place limit buy order
-        order_tx.send(Order::Limit { symbol: "XBTUSDT".into(), side: Sell, price: 90000.0, size: 50, client_id: Some(1)}).expect("order send failed");
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await; // let task process
-        // Verify order was placed with correct size_ahead
-        {
-            let s = state.read().await;
-            let key = (90000.0 / s.tick_size) as i64;
-            let vec = s.ask_orders.get(&key).expect("order should exist");
-            assert_eq!(vec[0].qty_remaining, 50);
-            assert_eq!(vec[0].size_ahead, 100);
-        }
-        // Trade with price > 90000.
-        trade_tx.send(TradeUpdate {
-           exchange: "mock_ex".to_string(),
-           base: "XBT".to_string(),
-           quote: "USDT".to_string(),
-           tick_size: 0.01,
-           side: Buy,
-           price: 90001.0,
-           size: 1, 
-           ts_exchange: Some(chrono::Utc::now().timestamp_micros()),
-           ts_received: chrono::Utc::now().timestamp_micros(),
-        }).unwrap();
-        
-        // Check fill at 9000.
-        let fill = tokio::time::timeout(std::time::Duration::from_secs(3), exec_rx.recv())
-            .await
-            .expect("timeout waiting for execution event")
-            .expect("exec_rx closed");
-        assert_eq!(fill.price,90000.0);
+
+    async fn spawn_engine(latency_ms: i64) -> Harness {
+        let (ws_tx, ws_rx) = channel(32);
+        let (order_tx, order_rx) = channel(32);
+        let (exec_tx, exec_rx) = channel(32);
+
+        tokio::spawn(run_deterministic(
+            ws_rx,
+            order_rx,
+            exec_tx,
+            latency_ms,
+        ));
+
+        Harness { ws_tx, order_tx, exec_rx }
     }
-    #[tokio::test]
-    async fn test_replace_by_client_id() {
-        let (orderbook, trade_tx, order_tx, mut exec_rx, state) = setup_execution_engine().await;
 
-        // Prepare two price levels
-        {
-            let mut ob = orderbook.write().await;
-            ob.asks.entries.insert(5000000, BookEntry {
-                side: "Ask".to_string(),
-                price: 50000.0,
-                size: 0,
-            });
-            ob.asks.entries.insert(4900000, BookEntry {
-                side: "Ask".to_string(),
-                price: 51000.0,
-                size: 0,
-            });
-        }
-
-        // Client places first order
-        order_tx.send(Order::Limit {
+    async fn send_book(
+        h: &Harness,
+        price: f64,
+        size: i64,
+        ts: i64,
+    ) {
+        h.ws_tx.send(AnyUpdate::BookUpdate(BookUpdate {
+            exchange: "test".into(),
             symbol: "XBTUSDT".into(),
-            side: Sell,
-            price: 50000.0,
-            size: 100,
-            client_id: Some(42),
-        }).expect("send failed");
+            action: "insert".into(),
+            tick_size: 0.01,
+            data: vec![(
+                "lvl".into(),
+                BookEntry {
+                    side: "Sell".into(),
+                    price,
+                    size,
+                },
+            )],
+            ts_exchange: None,
+            ts_received: ts,
+        }))
+        .await
+        .unwrap();
+    }
 
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-
-        // Verify first order exists
-        let first_order_id = {
-            let s = state.read().await;
-            let key = (50000.0 / s.tick_size) as i64;
-            let vec = s.ask_orders.get(&key).expect("first order should exist");
-            assert_eq!(vec.len(), 1);
-            vec[0].id
-        };
-
-        // Same client places replacement order at new price
-        order_tx.send(Order::Limit {
-            symbol: "XBTUSDT".into(),
-            side: Sell,
-            price: 51000.0,
-            size: 50,
-            client_id: Some(42),
-        }).expect("send failed");
-
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-
-        // Verify old order removed, new order exists
-        {
-            let s = state.read().await;
-
-            let old_key = (50000.0 / s.tick_size) as i64;
-            assert!(
-                s.ask_orders.get(&old_key).is_none(),
-                "old order should be cancelled on replace"
-            );
-
-            let new_key = (51000.0 / s.tick_size) as i64;
-            let vec = s.ask_orders.get(&new_key).expect("new order should exist");
-            assert_eq!(vec.len(), 1);
-            assert_eq!(vec[0].qty_remaining, 50);
-            assert_ne!(vec[0].id, first_order_id);
-
-            // by_client_id should map to new order id
-            let mapped = s.by_client_id.get(&42).copied().expect("client id missing");
-            assert_eq!(mapped, vec[0].id);
-        }
-
-        // Trade arrives at new price, should fill ONLY replacement order
-        trade_tx.send(TradeUpdate {
-            exchange: "mock".into(),
+    async fn send_trade(
+        h: &Harness,
+        side: common::OrderSide,
+        price: f64,
+        size: i64,
+        ts: i64,
+    ) {
+        h.ws_tx.send(AnyUpdate::TradeUpdate(TradeUpdate {
+            exchange: "test".into(),
             base: "XBT".into(),
             quote: "USDT".into(),
             tick_size: 0.01,
-            side: Buy,
-            price: 51000.0,
-            size: 50,
-            ts_exchange: Some(chrono::Utc::now().timestamp_micros()),
-            ts_received: chrono::Utc::now().timestamp_micros(),
-        }).expect("trade send failed");
+            side,
+            price,
+            size,
+            ts_exchange: None,
+            ts_received: ts,
+        }))
+        .await
+        .unwrap();
+    }
+
+    async fn send_limit(
+        h: &Harness,
+        side: common::OrderSide,
+        price: f64,
+        size: i64,
+        client_id: u64,
+        ts: i64,
+    ) {
+        h.order_tx.send(Order::Limit {
+            symbol: "XBTUSDT".into(),
+            side,
+            price,
+            size,
+            client_id: Some(client_id),
+            ts_received: ts,
+        })
+        .await
+        .unwrap();
+    }
+    async fn flush(h: &Harness, ts: i64) {
+        h.ws_tx.send(AnyUpdate::BookUpdate(BookUpdate {
+            exchange: "test".into(),
+            symbol: "XBTUSDT".into(),
+            action: "update".into(),
+            tick_size: 0.01,
+            data: vec![],
+            ts_exchange: None,
+            ts_received: ts,
+        }))
+        .await
+        .unwrap();
+    }
+
+
+    #[tokio::test]
+    async fn full_fill_single_order() {
+        let mut h = spawn_engine(0).await;
+        let t0 = 1_000;
+
+        // Create a level in orderbook
+        send_book(&h, 50_000.0, 0, t0).await;
+        // Limit order in queue, 
+        send_limit(&h, Sell, 50_000.0, 100, 1, t0).await;
+        // time advances past latency_us, order -> restingOrder.
+        send_trade(&h, Buy, 49_000.0, 100, t0 + 2).await; // flush
+        // Resting Order get matched with trade.
+        send_trade(&h, Buy, 50_000.0, 100, t0 + 3).await;
 
         let fill = tokio::time::timeout(
-            std::time::Duration::from_secs(1),
-            exec_rx.recv(),
-        )
-        .await
-        .expect("timeout")
-        .expect("exec closed");
+                std::time::Duration::from_millis(100),
+                h.exec_rx.recv(),
+            ).await.unwrap().unwrap();
 
+        assert_eq!(fill.size, 100);
+        assert_eq!(fill.price, 50_000.0);
+
+    }
+
+    #[tokio::test]
+    async fn partial_then_full_fill() {
+        let mut h = spawn_engine(0).await;
+        let t0 = 2_000;
+
+        send_book(&h, 40_000.0, 0, t0).await;
+        send_limit(&h, Buy, 40_000.0, 50, 1, t0).await;
+
+        send_trade(&h, Sell, 40_000.0, 20, t0 + 1).await;
+        let f1 = h.exec_rx.recv().await.unwrap();
+        assert_eq!(f1.size, 20);
+
+        send_trade(&h, Sell, 40_000.0, 30, t0 + 2).await;
+        let f2 = h.exec_rx.recv().await.unwrap();
+        assert_eq!(f2.size, 30);
+    }
+
+    #[tokio::test]
+    async fn fifo_two_orders() {
+        let mut h = spawn_engine(0).await;
+        let t0 = 3_000;
+
+        send_book(&h, 60_000.0, 0, t0).await;
+
+        send_limit(&h, Sell, 60_000.0, 30, 1, t0).await;
+
+        send_book(&h, 60_000.0, 0, t0 + 1).await;
+
+        send_limit(&h, Sell, 60_000.0, 50, 2, t0 + 1).await;
+        // Order flush
+        send_trade(&h, Buy, 59_000.0, 40, t0 + 2).await;
+        // Trade to match both orders
+        send_trade(&h, Buy, 60_000.0, 40, t0 + 3).await;
+
+        let f1 = tokio::time::timeout(
+                std::time::Duration::from_millis(100),
+                h.exec_rx.recv(),
+            ).await.unwrap().unwrap();
+        let f2 = tokio::time::timeout(
+                std::time::Duration::from_millis(100),
+                h.exec_rx.recv(),
+            ).await.unwrap().unwrap();
+
+        assert_eq!(f1.size, 30);
+        assert_eq!(f2.size, 10);
+    }
+
+    #[tokio::test]
+    async fn replace_by_client_id() {
+        let mut h = spawn_engine(0).await;
+        let t0 = 1_000;
+
+        send_book(&h, 50_000.0, 0, t0).await;
+        send_book(&h, 51_000.0, 0, t0).await;
+
+        send_limit(&h, Sell, 51_000.0, 100, 42, t0).await;
+        send_limit(&h, Sell, 50_000.0, 50, 42, t0 + 2).await;
+        // Trade to flush orders.
+        send_trade(&h, Buy, 49_000.0, 100, t0 + 4).await;
+
+        send_trade(&h, Buy, 50_000.0, 50, t0 + 5).await;
+
+        let fill = h.exec_rx.recv().await.unwrap();
+        assert_eq!(fill.price, 50_000.0);
         assert_eq!(fill.size, 50);
-        assert_eq!(fill.price, 51000.0);
+        
+        send_trade(&h, Buy, 51_000.0, 100, t0 + 6).await;
+        let res = tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            h.exec_rx.recv(),
+        ).await;
+        assert!(res.is_err(), "no further fills expected");
+    }
 
-        // No more orders should remain
-        {
-            let s = state.read().await;
-            assert!(s.ask_orders.is_empty(), "all orders should be gone after fill");
-            assert!(s.by_client_id.is_empty(), "client map should be empty");
-        }
+    #[tokio::test]
+    async fn order_blocked_until_latency_passes() {
+        let mut h = spawn_engine(1).await; // 1 ms latency
+        let t0 = now_us();
+
+        send_book(&h, 50_000.0, 0, t0).await;
+        send_limit(&h, Sell, 50_000.0, 10, 1, t0 + 100).await;
+
+        send_trade(&h, Buy, 50_000.0, 10, t0 + 500).await;
+
+        let early = tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            h.exec_rx.recv(),
+        )
+        .await;
+
+        assert!(early.is_err(), "order must not be released early");
+
+        // advance watermark
+        send_book(&h, 50_000.0, 0, t0 + 2_000).await;
+        send_trade(&h, Buy, 50_000.0, 10, t0 + 2_001).await;
+
+        let fill = h.exec_rx.recv().await.unwrap();
+        assert_eq!(fill.size, 10);
     }
 }
