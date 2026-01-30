@@ -124,7 +124,6 @@ impl AvellanedaStrategy {
 impl Strategy for AvellanedaStrategy {
     fn on_market(&mut self, update: &StrategyInput) -> Vec<Order> {
         let mut orders = Vec::new();
-        println!("Avellaneda Strategy received market update: {:?}", update);
         match update {
             StrategyInput::Avellaneda(av) => {
                 self.ts = av.ts_interval as i64;
@@ -187,10 +186,10 @@ impl Strategy for AvellanedaStrategy {
             });            
         }
         // Debug
-        println!(
-            "Avellaneda Strategy Quotes - Position: {}, Bid: {}, Ask: {}",
-            self.position, bid, ask
-        );
+        // println!(
+        //     "Avellaneda Strategy Quotes - Position: {}, Bid: {}, Ask: {}",
+        //     self.position, bid, ask
+        // );
 
         orders
     }

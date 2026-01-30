@@ -113,10 +113,6 @@ pub async fn sequencer_run(
             }
         }
         while let Some(output) = try_emit(&mut state) {
-            println!("Sequencer emitting output for interval {}", match &output {
-                StrategyInput::Avellaneda(av) => av.ts_interval,
-                _ => 0,
-            });
             strategy_tx.send(output.clone()).await?;
         }
     }

@@ -391,17 +391,14 @@ pub async fn run_deterministic(
                         apply_book_update(book_update,&mut engine.orderbook);
                         engine.book_watermark_ts = engine.orderbook.timestamp;
                         //
-                        println!("Book updated {:?}, {:?}", engine.orderbook.bids.entries, engine.orderbook.asks.entries);
                     }
 
                     AnyUpdate::TradeUpdate(trade) => {
                         engine.book_watermark_ts =
                             engine.book_watermark_ts.max(trade.ts_received);
 
-                        println!("Trade received: {:?}", trade);
                         let fills = engine.exec.on_trade(trade, &engine.orderbook).await;
                         for fill in fills {
-                            println!("Fill generated: {:?}", fill);
                             if let Err(e) = exec_tx.send(fill).await {
                                 eprintln!("failed to send execution event: {:?}", e);
                             }
@@ -419,7 +416,6 @@ pub async fn run_deterministic(
             Some(order) = order_rx.recv() => {
                 match &order {
                     Order::Market {  .. } => {
-                        unimplemented!("Market orders not supported yet");
                     }
                     Order::Limit { ts_received, .. } => {
                         engine.pending_orders.push_back((*ts_received, order));
@@ -434,8 +430,6 @@ pub async fn run_deterministic(
                 }
                 // Check for orders
                 release_orders(&mut engine, ex_latency).await;
-                println!("Pending orders: {:?}", engine.pending_orders);
-                println!("Resting orders: {:?} {:?}", engine.exec.bid_orders, engine.exec.ask_orders);
             }
         }
     }

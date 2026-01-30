@@ -1,5 +1,5 @@
 use common::{OrderSide, ExecutionEvent};
-use tokio::sync::broadcast;
+use tokio::sync::mpsc;
 
 #[derive(Clone, Debug)]
 pub struct PositionState {
@@ -10,7 +10,7 @@ pub struct PositionState {
     pub cash: f64,
 }
 pub async fn run_position_engine(
-    mut rx_exec: broadcast::Receiver<ExecutionEvent>,
+    mut rx_exec: mpsc::Receiver<ExecutionEvent>,
     // tx_position: broadcast::Sender<PositionState>,
 ) {
     let mut state = PositionState {
@@ -19,10 +19,18 @@ pub async fn run_position_engine(
         realized_pnl: 0.0,
         cash: 0.0,
     };
-
-    while let Ok(exec) = rx_exec.recv().await {
+    let MICROS_PER_SECOND: f64 = 1_000_000.0;
+    let SECOND_PER_DAY: f64 = 86400.0;
+    let mut ts_start = None;
+    while let Some(exec) = rx_exec.recv().await {
+        if ts_start.is_none() {
+            ts_start = exec.ts_received.into();
+        }
+        let elapsed = exec.ts_received - ts_start.unwrap();
+        let percent = (elapsed as f64 / ((MICROS_PER_SECOND*SECOND_PER_DAY)) * 100.0).round();
+        
         apply_execution(&mut state, &exec);
-        println!("Updated position: position: {:?}, avg_price: {:?}, realized_pnl: {:?}, cash: {:?}", state.position, state.avg_price, state.realized_pnl, state.cash);
+        println!("{}% {} Updated position: position: {:?}, avg_price: {:?}, realized_pnl: {:?}, cash: {:?}", percent, exec.ts_received,state.position, state.avg_price, state.realized_pnl, state.cash);
         // let _ = tx_position.send(state.clone());
     }
 }

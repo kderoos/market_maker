@@ -10,13 +10,14 @@ use book::{book_engine, print_book,pub_book_depth, OrderBook};
 use std::collections::HashMap;
 use std::sync::{Arc};
 use tokio::sync::{RwLock,mpsc,broadcast};
-use common::{Connector, AnyWsUpdate, AnyUpdate, ChannelType, ConnectorCommand};
+use common::{Order, ExecutionEvent, Connector, AnyWsUpdate, AnyUpdate, ChannelType, ConnectorCommand};
 use connectors_bitmex::BitmexConnector;
 use connectors_bitvavo::BitvavoConnector;
 use connectors_tardis::TardisConnector;
 use utils::forward::ws_forward_trade_quote;
 use strategy::{sequencer,runner::run_strategy, avellaneda::AvellanedaStrategy};
 use position::run_position_engine;
+use execution::run_deterministic;
 
 use std::path::PathBuf;
 
@@ -126,15 +127,8 @@ impl Engine {
         // ));
 
         // // spawn execution engine
-        let (tx_exec, _) = broadcast::channel(100);
-        let (tx_order,_) = broadcast::channel(100);
-        // let book_state_exec = book_state.clone();
-        // tokio::spawn(execution::run(
-        //     book_state_exec,
-        //     tx_ws.subscribe(), // Receiver <AnyWsUpdate>
-        //     tx_order.subscribe(), //Receiver <Order>
-        //     tx_exec.clone(), // Sender <ExecutionEvent>
-        // ));
+        let (tx_exec, mut rx_exec) = mpsc::channel::<ExecutionEvent>(100);
+        let (tx_order,mut rx_order) = mpsc::channel::<Order>(100);
 
         // // Spawn connectors
         let data_root = "/opt/tardisData/datasets/".to_string();
@@ -176,56 +170,71 @@ impl Engine {
             0.2,   // delta
             0.1,   // xi
         );
+        // fan-out executions to position engine and strategy
+        let (tx_exec_strat, rx_exec_strat) = mpsc::channel::<ExecutionEvent>(100);
+        let (tx_exec_pos, mut rx_exec_pos) = mpsc::channel::<ExecutionEvent>(100);
+        // Spawn a task to forward executions to both strategy and position engine
+        tokio::spawn(async move {
+            while let Some(ex) = rx_exec.recv().await {
+                let _ = tx_exec_strat.send(ex.clone()).await;
+                let _ = tx_exec_pos.send(ex.clone()).await;
+            }
+        });
         
         // Spawn strategy runner
         tokio::spawn(run_strategy(strategy,
                 rx_strategy, //Receiver <StrategyInput>
-                tx_exec.subscribe(), // Receiver <ExecutionEvent>
-                tx_order.clone(), // Sender <Order>
+                rx_exec_strat, // Receiver <ExecutionEvent>
+                tx_order, // Sender <Order>
                 )
         );
-        // //Mock execution engine by directly sending executions on order events
-        let mut rx_order = tx_order.subscribe();
-        let tx_exec_clone = tx_exec.clone();
+        //Execution engine
+        tokio::spawn(run_deterministic(
+            rx_engine,  //Receiver<AnyUpdate>,
+            rx_order,   //Receiver<Order>,
+            tx_exec,    //Sender<ExecutionEvent>,
+            0,         //latency in ms
+        ));
 
-        tokio::spawn(async move {
-            while let Ok(order) = rx_order.recv().await {
-                println!("🧪 Order received (debug exec): {:?}", order);
+        // //Mock execution engine by directly sending executions on order events
+        // tokio::spawn(async move {
+        //     while let Some(order) = rx_order.recv().await {
+        //         println!("🧪 Order received (debug exec): {:?}", order);
             
-                use common::{ExecutionEvent, Order};
+        //         use common::{ExecutionEvent, Order};
             
-                let (symbol, side, price, size, client_id) = match order {
-                    Order::Limit {
-                        symbol,
-                        side,
-                        price,
-                        size,
-                        client_id,
-                        ..
-                    } => (symbol, side, price, size, client_id),
-                    _ => continue, // only handle limit orders in this mock
+        //         let (symbol, side, price, size, client_id) = match order {
+        //             Order::Limit {
+        //                 symbol,
+        //                 side,
+        //                 price,
+        //                 size,
+        //                 client_id,
+        //                 ..
+        //             } => (symbol, side, price, size, client_id),
+        //             _ => continue, // only handle limit orders in this mock
                 
-                };
-                let now = chrono::Utc::now().timestamp_micros();
-                let exec = ExecutionEvent {
-                    action: "Fill".to_string(), // important
-                    symbol,
-                    order_id: client_id.unwrap_or(0) as i64,               // mock fill
-                    side,
-                    price,
-                    size,
-                    ts_exchange: Some(now),      // mock fill
-                    ts_received: now,
-                };
+        //         };
+        //         let now = chrono::Utc::now().timestamp_micros();
+        //         let exec = ExecutionEvent {
+        //             action: "Fill".to_string(), // important
+        //             symbol,
+        //             order_id: client_id.unwrap_or(0) as i64,               // mock fill
+        //             side,
+        //             price,
+        //             size,
+        //             ts_exchange: Some(now),      // mock fill
+        //             ts_received: now,
+        //         };
             
-                // broadcast::Sender::send is non-async
-                let _ = tx_exec_clone.send(exec);
-            }
-        });
+        //         // broadcast::Sender::send is non-async
+        //         let _ = tx_exec.send(exec);
+        //     }
+        // });
 
 
         tokio::spawn(run_position_engine(
-            tx_exec.subscribe(),
+            rx_exec_pos, //Receiver<ExecutionEvent>,
             // tx_position,
         ));
 
