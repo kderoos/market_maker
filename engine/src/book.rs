@@ -3,8 +3,6 @@ use tokio::sync::{broadcast,mpsc,RwLock};
 use common::{AnyUpdate, BookEntry,BookUpdate};
 use std::collections::{HashMap}; 
 
-
-
 pub struct OrderBookSide {
     // pub entries: BTreeMap<i64,BookEntry>,// price*100 as key
     pub entries: HashMap<i64,BookEntry>,// price*100 as key
@@ -46,7 +44,6 @@ impl Default for OrderBook {
     }
 }
 pub async fn update_book_state(book_update: BookUpdate, book_state: Arc<RwLock<OrderBook>>) {
-        // println!("Book update received: action: {}, entries: {}", book_update.action, book_update.data.len());
         // Process BookUpdate messages
         {
             let mut state = book_state.write().await;

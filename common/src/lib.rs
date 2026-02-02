@@ -7,6 +7,15 @@ use tokio::sync::mpsc;
 use tokio::sync::broadcast;
 use std::path::PathBuf;
 
+#[derive(Clone, Debug)]
+pub struct PositionState {
+    pub timestamp: i64,
+    pub position: i64,
+    pub avg_price: f64,
+    pub realized_pnl: f64,
+    // pub unrealized_pnl: f64,
+    pub cash: f64,
+}
 #[derive(Debug, Clone, Serialize)]
 pub struct AvellanedaInput {
     pub ts_interval: u64,
@@ -116,7 +125,8 @@ pub struct PenetrationUpdate{
 }
 #[derive(Debug, Clone, Serialize)]
 pub struct Candle {
-    pub ts_start: i64,   // epoch ms for the start of candle bucket
+    pub symbol: String,
+    pub ts_open: i64,   // epoch ms for the start of candle bucket
     pub open: f64,
     pub high: f64,
     pub low: f64,

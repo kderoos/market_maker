@@ -124,7 +124,7 @@ mod tests {
             .expect("Timed out waiting for candle")
             .expect("No candle received");
         if let AnyWsUpdate::TradeCandle(candle) = msg {
-            assert_eq!(candle.ts_start, 1000);
+            assert_eq!(candle.ts_open, 1000);
             assert_eq!(candle.open, 100.0);
             assert_eq!(candle.high, 101.0);
             assert_eq!(candle.low, 100.0);

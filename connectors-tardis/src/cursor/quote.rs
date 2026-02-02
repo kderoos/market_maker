@@ -46,5 +46,3 @@ impl DomainEventRow for QuoteRow {
     }
 }
 pub type QuoteCursor = CsvCursor<QuoteRow>;
-
-

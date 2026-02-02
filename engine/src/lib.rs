@@ -1,4 +1,5 @@
 pub mod book;
+pub mod output;
 mod penetration;
 mod regression;
 mod volatility;
@@ -18,6 +19,10 @@ use utils::forward::ws_forward_trade_quote;
 use strategy::{sequencer,runner::run_strategy, avellaneda::AvellanedaStrategy};
 use position::run_position_engine;
 use execution::run_deterministic;
+use output::console::ConsoleSink;
+use output::event::OutputEvent;
+use output::sink::OutputSink;
+use output::csv::SimpleCsvSink;
 
 use std::path::PathBuf;
 
@@ -173,14 +178,26 @@ impl Engine {
         // fan-out executions to position engine and strategy
         let (tx_exec_strat, rx_exec_strat) = mpsc::channel::<ExecutionEvent>(100);
         let (tx_exec_pos, mut rx_exec_pos) = mpsc::channel::<ExecutionEvent>(100);
+        let (tx_exec_out, mut rx_exec_out) = mpsc::channel::<ExecutionEvent>(100);
         // Spawn a task to forward executions to both strategy and position engine
         tokio::spawn(async move {
             while let Some(ex) = rx_exec.recv().await {
                 let _ = tx_exec_strat.send(ex.clone()).await;
                 let _ = tx_exec_pos.send(ex.clone()).await;
+                let _ = tx_exec_out.send(ex.clone()).await;
             }
         });
-        
+
+        // Fan out orders to Output writer
+        let (tx_order_out, mut rx_order_out) = mpsc::channel::<Order>(100);
+        let (tx_order_exec, mut rx_order_exec) = mpsc::channel::<Order>(100);
+        tokio::spawn(async move {
+            while let Some(order) = rx_order.recv().await {
+                let _ = tx_order_out.send(order.clone()).await;
+                let _ = tx_order_exec.send(order.clone()).await;
+            }
+        });
+
         // Spawn strategy runner
         tokio::spawn(run_strategy(strategy,
                 rx_strategy, //Receiver <StrategyInput>
@@ -191,52 +208,63 @@ impl Engine {
         //Execution engine
         tokio::spawn(run_deterministic(
             rx_engine,  //Receiver<AnyUpdate>,
-            rx_order,   //Receiver<Order>,
+            rx_order_exec,   //Receiver<Order>,
             tx_exec,    //Sender<ExecutionEvent>,
             0,         //latency in ms
         ));
 
-        // //Mock execution engine by directly sending executions on order events
-        // tokio::spawn(async move {
-        //     while let Some(order) = rx_order.recv().await {
-        //         println!("🧪 Order received (debug exec): {:?}", order);
-            
-        //         use common::{ExecutionEvent, Order};
-            
-        //         let (symbol, side, price, size, client_id) = match order {
-        //             Order::Limit {
-        //                 symbol,
-        //                 side,
-        //                 price,
-        //                 size,
-        //                 client_id,
-        //                 ..
-        //             } => (symbol, side, price, size, client_id),
-        //             _ => continue, // only handle limit orders in this mock
-                
-        //         };
-        //         let now = chrono::Utc::now().timestamp_micros();
-        //         let exec = ExecutionEvent {
-        //             action: "Fill".to_string(), // important
-        //             symbol,
-        //             order_id: client_id.unwrap_or(0) as i64,               // mock fill
-        //             side,
-        //             price,
-        //             size,
-        //             ts_exchange: Some(now),      // mock fill
-        //             ts_received: now,
-        //         };
-            
-        //         // broadcast::Sender::send is non-async
-        //         let _ = tx_exec.send(exec);
-        //     }
-        // });
-
-
+        // Position engine
+        let (tx_position, mut rx_position) = mpsc::channel::<common::PositionState>(500);
         tokio::spawn(run_position_engine(
             rx_exec_pos, //Receiver<ExecutionEvent>,
-            // tx_position,
+            tx_position,
         ));
+
+        let (tx_output, mut rx_output) = mpsc::channel::<OutputEvent>(1000);
+        // Output channel fan-in
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    Some(pos) = rx_position.recv() => {
+                        let output_event = OutputEvent::Position(pos);
+                        let _ = tx_output.send(output_event).await;
+                    }
+                    Some(o) = rx_order_out.recv() => {
+                        let output_event = OutputEvent::Order(o);
+                        let _ = tx_output.send(output_event).await;
+                    }
+                    Some(ex) = rx_exec_out.recv() => {
+                        let output_event = OutputEvent::Trade(ex);
+                        let _ = tx_output.send(output_event).await;
+                    }
+                }
+            }
+        });
+        // Fan out rx_output to multiple sinks
+        let (tx_console, mut rx_console) = mpsc::channel::<OutputEvent>(1000);
+        let (tx_csv, mut rx_csv) = mpsc::channel::<OutputEvent>(1000);
+        tokio::spawn(async move {
+            while let Some(event) = rx_output.recv().await {
+                let _ = tx_console.send(event.clone()).await;
+                let _ = tx_csv.send(event.clone()).await;
+            }
+        });
+
+        // Console Output sink
+        let mut sink = Arc::new(ConsoleSink::new());
+        // let mut rx_csv = rx_output.clone();
+        tokio::spawn(async move {
+            while let Some(event) = rx_console.recv().await {
+                sink.handle(event).await;
+            }
+        });
+
+        // CSV Output sink
+        let sink = SimpleCsvSink::new("/tmp/engine_output");
+        // Spawn the single task that handles all CSV writing
+        tokio::spawn(async move {
+            sink.run(rx_csv).await;
+        });
 
         Engine {
             tx_cmd,
