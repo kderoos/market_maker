@@ -1,5 +1,7 @@
 pub mod book;
 pub mod output;
+mod features;
+mod config;
 mod penetration;
 mod regression;
 mod volatility;
@@ -23,7 +25,8 @@ use output::console::ConsoleSink;
 use output::event::OutputEvent;
 use output::sink::OutputSink;
 use output::csv::SimpleCsvSink;
-
+use features::{build::build_transformer, transform::DataTransformer, passthrough::PassThroughDataTransformer, sequenced::AvellanedaDataTransformer};
+use config::StrategyConfig;
 use std::path::PathBuf;
 
 use volatility::run_tick_volatility_sample_ema;
@@ -45,13 +48,23 @@ impl Engine {
         // mpsc channel for consumers of exchange updates
         let (tx_book, rx_book) = mpsc::channel::<AnyUpdate>(5000);
         let (tx_trade_exe, rx_trade_exe) = mpsc::channel::<AnyUpdate>(2000);
-        let (tx_trade_quote_pen, rx_trade_quote_pen) = mpsc::channel::<AnyUpdate>(2000);
-        let (tx_quote_vol, rx_quote_vol) = mpsc::channel::<AnyUpdate>(2000);
-        let (tx_quote_seq, mut rx_quote_seq) = mpsc::channel::<common::QuoteUpdate>(1000);
         let (tx_engine, rx_engine) = mpsc::channel::<AnyUpdate>(5000);
+        let (tx_transformer, rx_transformer) = mpsc::channel::<AnyUpdate>(5000);
 
         let book_state = Arc::new(RwLock::new(OrderBook::default()));
-        // Fan out rx_exchange to multiple engines
+
+        let cfg = StrategyConfig::new("avellaneda".to_string(), "XBTUSDT".to_string());
+        // Spawn data transformer to get in/output channels.
+        let transformer: Box<dyn DataTransformer> = match cfg.kind.as_str() {
+            "momentum" => Box::new(PassThroughDataTransformer),
+            "avellaneda" => Box::new(AvellanedaDataTransformer { symbol: cfg.symbol.clone() }),
+            other => panic!("Unknown strategy kind: {}", other),
+        };
+
+        let (tx_transformer, rx_strategy) = transformer.spawn();
+
+        // T intersection to forward book updates and trade updates to matching/book engine 
+        // and copies all updates to data transformer (preprocessing for strategy inputs).
         let tx_ws_clone = tx_ws.clone();
         tokio::spawn(async move {
             let mut rx_exchange = rx_exchange;
@@ -62,16 +75,14 @@ impl Engine {
                         match &update {
                             AnyUpdate::BookUpdate(_) => {
                                 let _ = tx_engine.send(update.clone()).await;
+                                let _ = tx_transformer.send(update.clone()).await;
                             }
                             AnyUpdate::TradeUpdate(_) => {
                                 let _ = tx_engine.send(update.clone()).await;
-                                let _ = tx_trade_quote_pen.send(update.clone()).await;
+                                let _ = tx_transformer.send(update.clone()).await;
                             }
                             AnyUpdate::QuoteUpdate(quote) => {
-                                let _ = tx_trade_quote_pen.send(update.clone()).await;
-                                let _ = tx_quote_vol.send(update.clone()).await;
-                                let _ = tx_quote_seq.send(quote.clone()).await;
-                                // let _ = tx_ws_clone.send(AnyWsUpdate::Quote(quote.clone())).unwrap();
+                                let _ = tx_transformer.send(update.clone()).await;
                             }
                         }
                     }
@@ -81,42 +92,42 @@ impl Engine {
                 }
             }
         });
-        // Create sequencer channels
-        let (tx_vol, mut rx_vol) = mpsc::channel::<common::VolatilityUpdate>(1000);
-        let (tx_pen, mut rx_pen) = mpsc::channel::<common::PenetrationUpdate>(1000);
-        let (tx_strategy, mut rx_strategy) = mpsc::channel::<common::StrategyInput>(1000);
+        // // Create sequencer channels
+        // let (tx_vol, mut rx_vol) = mpsc::channel::<common::VolatilityUpdate>(1000);
+        // let (tx_pen, mut rx_pen) = mpsc::channel::<common::PenetrationUpdate>(1000);
+        // let (tx_strategy, mut rx_strategy) = mpsc::channel::<common::StrategyInput>(1000);
 
-        // Spawn engine tasks
-        tokio::spawn(run_tick_volatility_sample_ema(
-            rx_quote_vol,
-            tx_vol,
-            500, //window_len (ticks)
-            0.500, //interval_s
-            2.0, //ema_half_life (s)
-            None, //sigma_min
-            None, //sigma_max
-            "XBTUSDT".to_string(),
-        ));
+        // // Spawn engine tasks
+        // tokio::spawn(run_tick_volatility_sample_ema(
+        //     rx_quote_vol,
+        //     tx_vol,
+        //     500, //window_len (ticks)
+        //     0.500, //interval_s
+        //     2.0, //ema_half_life (s)
+        //     None, //sigma_min
+        //     None, //sigma_max
+        //     "XBTUSDT".to_string(),
+        // ));
 
-        // Spawn penetration analyzer
-        tokio::spawn(penetration::engine(
-            rx_trade_quote_pen,
-            tx_pen,
-            // book_state.clone(),
-            120, //window_len
-            500, //num_bins
-            500, //interval_ms
-            "XBTUSDT".to_string(),
-        ));
+        // // Spawn penetration analyzer
+        // tokio::spawn(penetration::engine(
+        //     rx_trade_quote_pen,
+        //     tx_pen,
+        //     // book_state.clone(),
+        //     120, //window_len
+        //     500, //num_bins
+        //     500, //interval_ms
+        //     "XBTUSDT".to_string(),
+        // ));
 
-        // Spawn sequencer
-        tokio::spawn(sequencer::sequencer_run(
-            500, //interval_ms
-            rx_vol,
-            rx_pen,
-            rx_quote_seq,
-            tx_strategy.clone(),
-        ));
+        // // Spawn sequencer
+        // tokio::spawn(sequencer::sequencer_run(
+        //     500, //interval_ms
+        //     rx_vol,
+        //     rx_pen,
+        //     rx_quote_seq,
+        //     tx_strategy.clone(),
+        // ));
 
         // // Forward trade, quote from rx_exchange to tx_ws
         // tokio::spawn(ws_forward_trade_quote(
@@ -164,7 +175,7 @@ impl Engine {
         // tokio::spawn(async move {
         //     bitmex.run(tx_bitmex_updates, rx_bitmex_cmd).await;
         // });
-
+        
         // Avellaneda strategy
         let mut strategy = AvellanedaStrategy::new(
             "XBTUSDT".to_string(),

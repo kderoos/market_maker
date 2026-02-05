@@ -106,6 +106,7 @@ mod tests {
     #[test]
     fn buy_updates_position_and_avg_price() {
         let mut s = PositionState {
+            timestamp: 0,
             position: 0,
             avg_price: 0.0,
             realized_pnl: 0.0,
@@ -123,6 +124,7 @@ mod tests {
     #[test]
     fn multiple_buys_compute_vwap() {
         let mut s = PositionState {
+            timestamp: 0,
             position: 0,
             avg_price: 0.0,
             realized_pnl: 0.0,
@@ -140,6 +142,7 @@ mod tests {
     #[test]
     fn partial_sell_realizes_pnl() {
         let mut s = PositionState {
+            timestamp: 0,
             position: 10,
             avg_price: 100.0,
             realized_pnl: 0.0,
@@ -157,6 +160,7 @@ mod tests {
     #[test]
     fn full_exit_resets_avg_price() {
         let mut s = PositionState {
+            timestamp: 0,
             position: 5,
             avg_price: 200.0,
             realized_pnl: 0.0,
@@ -184,6 +188,7 @@ mod tests {
         ];
 
         let mut s = PositionState {
+            timestamp: 0,
             position: 0,
             avg_price: 0.0,
             realized_pnl: 0.0,

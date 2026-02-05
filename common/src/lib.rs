@@ -28,6 +28,16 @@ pub struct AvellanedaInput {
 pub enum StrategyInput {
     Avellaneda(AvellanedaInput),
     Trade(TradeUpdate),
+    Quote(QuoteUpdate),
+}
+impl StrategyInput {
+    pub fn from_any_update(update: AnyUpdate) -> Option<Self> {
+        match update {
+            AnyUpdate::TradeUpdate(trade) => Some(StrategyInput::Trade(trade)),
+            AnyUpdate::QuoteUpdate(quote) => Some(StrategyInput::Quote(quote)),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
