@@ -4,6 +4,7 @@ use super::transform::DataTransformer;
 use strategy::{sequencer,runner::run_strategy};
 use crate::penetration;
 use crate::volatility::run_tick_volatility_sample_ema;
+use crate::config::AvellanedaConfig;
 use common::QuoteUpdate;
 
 /// Data transformer that prepares data for Avellaneda-Stoikov strategy.
@@ -14,9 +15,21 @@ use common::QuoteUpdate;
 /// 
 /// It fans out the AnyUpdate stream into Quote and Trade steams to compute the required aggregates. Then a sequencer
 /// combines these streams into AvellanedaInput structs which are sent to the strategy.
+///
+/// AnyUpdate
+///   |
+///   v
+/// Fan-out
+///   |
+///   +--> [Trade+Quote] --> Penetration Engine --> PenetrationUpdate --+
+///   |                                                                 |
+///   +--> [Quote]        --> Volatility Engine  --> VolatilityUpdate ---+--> Sequencer --> StrategyInput
+///   |                                                                 |
+///   +--> [Quote]        ----------------------------------------------+
+
 pub struct AvellanedaDataTransformer {
     pub symbol: String,
-    // config params for vol, pen, etc
+    pub cfg: AvellanedaConfig,
 }
 impl DataTransformer for AvellanedaDataTransformer {
     fn spawn(self: Box<Self>) -> (mpsc::Sender<AnyUpdate>, mpsc::Receiver<StrategyInput>) {
@@ -62,34 +75,30 @@ impl DataTransformer for AvellanedaDataTransformer {
         let (tx_pen, mut rx_pen) = mpsc::channel::<common::PenetrationUpdate>(1000);
         let (tx_out, mut rx_out) = mpsc::channel::<common::StrategyInput>(1000);
         
-
         // Spawn engine tasks
         tokio::spawn(run_tick_volatility_sample_ema(
             rx_quote_vol,
             tx_vol,
-            500, //window_len (ticks)
-            0.500, //interval_s
-            2.0, //ema_half_life (s)
-            None, //sigma_min
-            None, //sigma_max
-            // "XBTUSDT".to_string(),
+            self.cfg.vol.window_len,
+            self.cfg.vol.interval_s,
+            self.cfg.vol.ema_half_life,
+            self.cfg.vol.sigma_min,
+            self.cfg.vol.sigma_max,
             self.symbol.clone(),
         ));
-
         // Spawn penetration analyzer
         tokio::spawn(penetration::engine(
             rx_trade_quote_pen,
             tx_pen,
-            // book_state.clone(),
-            120, //window_len
-            500, //num_bins
-            500, //interval_ms
-            "XBTUSDT".to_string(),
+            self.cfg.penetration.window_len,
+            self.cfg.penetration.num_bins,
+            self.cfg.penetration.interval_ms,
+            self.symbol.clone(),
         ));
 
         // Spawn sequencer
         tokio::spawn(sequencer::sequencer_run(
-            500, //interval_ms
+            self.cfg.sequencer.interval_ms,
             rx_vol,
             rx_pen,
             rx_quote_seq,

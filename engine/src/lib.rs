@@ -1,11 +1,12 @@
 pub mod book;
 pub mod output;
 mod features;
-mod config;
+pub mod config;
 mod penetration;
 mod regression;
 mod volatility;
 mod position;
+pub mod strategy_factory;
 pub mod execution;
 
 use book::{book_engine, print_book,pub_book_depth, OrderBook};
@@ -26,8 +27,11 @@ use output::event::OutputEvent;
 use output::sink::OutputSink;
 use output::csv::SimpleCsvSink;
 use features::{build::build_transformer, transform::DataTransformer, passthrough::PassThroughDataTransformer, sequenced::AvellanedaDataTransformer};
-use config::StrategyConfig;
+use config::EngineConfig;
 use std::path::PathBuf;
+use tracing_subscriber;
+use tracing::info;
+use strategy_factory::build_strategy;
 
 use volatility::run_tick_volatility_sample_ema;
 
@@ -38,7 +42,8 @@ pub struct Engine {
 }
 
 impl Engine {
-    pub fn init() -> Self {
+    pub fn init(cfg: EngineConfig) -> Self {
+        info!("Initializing engine...");
         // let (tx_exchange, rx_exchange) = broadcast::channel(1000);
         let (tx_exchange, rx_exchange) = mpsc::channel::<AnyUpdate>(10_000);
         // broadcast channels for commands and ws updates
@@ -53,11 +58,13 @@ impl Engine {
 
         let book_state = Arc::new(RwLock::new(OrderBook::default()));
 
-        let cfg = StrategyConfig::new("avellaneda".to_string(), "XBTUSDT".to_string());
         // Spawn data transformer to get in/output channels.
-        let transformer: Box<dyn DataTransformer> = match cfg.kind.as_str() {
+        let transformer: Box<dyn DataTransformer> = match cfg.strategy.features_type.as_str() {
             "momentum" => Box::new(PassThroughDataTransformer),
-            "avellaneda" => Box::new(AvellanedaDataTransformer { symbol: cfg.symbol.clone() }),
+            "avellaneda" => Box::new(AvellanedaDataTransformer { cfg: cfg.strategy.avellaneda.clone()
+                                                                    .expect("Avellaneda config must be set for Avellaneda strategy"),
+                                                                symbol: cfg.strategy.symbol.clone()
+                                                             }),
             other => panic!("Unknown strategy kind: {}", other),
         };
 
@@ -92,104 +99,63 @@ impl Engine {
                 }
             }
         });
-        // // Create sequencer channels
-        // let (tx_vol, mut rx_vol) = mpsc::channel::<common::VolatilityUpdate>(1000);
-        // let (tx_pen, mut rx_pen) = mpsc::channel::<common::PenetrationUpdate>(1000);
-        // let (tx_strategy, mut rx_strategy) = mpsc::channel::<common::StrategyInput>(1000);
-
-        // // Spawn engine tasks
-        // tokio::spawn(run_tick_volatility_sample_ema(
-        //     rx_quote_vol,
-        //     tx_vol,
-        //     500, //window_len (ticks)
-        //     0.500, //interval_s
-        //     2.0, //ema_half_life (s)
-        //     None, //sigma_min
-        //     None, //sigma_max
-        //     "XBTUSDT".to_string(),
-        // ));
-
-        // // Spawn penetration analyzer
-        // tokio::spawn(penetration::engine(
-        //     rx_trade_quote_pen,
-        //     tx_pen,
-        //     // book_state.clone(),
-        //     120, //window_len
-        //     500, //num_bins
-        //     500, //interval_ms
-        //     "XBTUSDT".to_string(),
-        // ));
-
-        // // Spawn sequencer
-        // tokio::spawn(sequencer::sequencer_run(
-        //     500, //interval_ms
-        //     rx_vol,
-        //     rx_pen,
-        //     rx_quote_seq,
-        //     tx_strategy.clone(),
-        // ));
-
-        // // Forward trade, quote from rx_exchange to tx_ws
-        // tokio::spawn(ws_forward_trade_quote(
-        //     tx_exchange.subscribe(),
-        //     tx_ws.clone(),
-        // ));
-
-        // // Spawn book engine
-        // let book_state_clone = book_state.clone();
-        // tokio::spawn(book_engine(
-        //     rx_engine,
-        //     book_state_clone,
-        // ));
 
         // // spawn execution engine
         let (tx_exec, mut rx_exec) = mpsc::channel::<ExecutionEvent>(100);
         let (tx_order,mut rx_order) = mpsc::channel::<Order>(100);
 
-        // // Spawn connectors
-        let data_root = "/opt/tardisData/datasets/".to_string();
+        if cfg.data.from_csv {
+            // Tardis connector from CSV files
+            info!("Starting Tardis connector from CSV files...");
+            // Build file paths from config
+            let data_root = cfg.data.tardis_root.clone().expect("data_root must be set for CSV data source");
+            let trades_path = data_root.clone() + cfg.data.trades_csv.expect("missing filename trades_csv").as_str();
+            let quotes_path = data_root.clone() + cfg.data.quotes_csv.expect("missing filename quotes_csv").as_str();
+            let book_path = data_root.clone() + cfg.data.book_csv.expect("missing filename book_csv").as_str();
+            // Define Tardis paths
+            let paths = common::TardisPaths {
+                trades: PathBuf::from(trades_path),
+                book: Some(PathBuf::from(book_path)),
+                quotes: Some(PathBuf::from(quotes_path)),
+            };
 
-        let trades_path = data_root.clone() + "bitmex_trades_2024-08-01_XBTUSD.csv.gz";
-        let quotes_path = data_root.clone() + "bitmex_quotes_2024-08-01_XBTUSD.csv.gz";
-        let book_path = data_root.clone() + "bitmex_incremental_book_L2_2024-08-01_XBTUSD.csv.gz";
+            // Create Tardis connector
+            let mut tardis = TardisConnector::new(paths).unwrap();
+            let tx_tardis_updates = tx_exchange.clone();
+            let rx_tardis_cmd = tx_cmd.subscribe();
+            
+            // Spawn Tardis connector task
+            tokio::spawn(async move {
+                tardis.run(tx_tardis_updates, rx_tardis_cmd).await;
+            });
+        } else {
+            info!("Starting live Bitmex connector...");
+            // Bitmex connector
+            let mut bitmex = BitmexConnector::default(); 
+            let tx_bitmex_updates = tx_exchange.clone();
+            let rx_bitmex_cmd = tx_cmd.subscribe();
+            tokio::spawn(async move {
+                bitmex.run(tx_bitmex_updates, rx_bitmex_cmd).await;
+            });
+            // subscibe to channels trade, quote and book.
+            let msg_trade = ConnectorCommand::Subscribe{ symbol: cfg.strategy.symbol.clone(), channel: ChannelType::Trade };
+            let msg_book = ConnectorCommand::Subscribe{ symbol: cfg.strategy.symbol.clone(), channel: ChannelType::Book };
+            let msg_quote = ConnectorCommand::Subscribe{ symbol: cfg.strategy.symbol.clone(), channel: ChannelType::Quote };
+            
+            let _ = tx_cmd.send(msg_trade);
+            let _ = tx_cmd.send(msg_book);
+            let _ = tx_cmd.send(msg_quote);
+        }
 
 
-        // Tardis connector
-        let paths = common::TardisPaths {
-            trades: PathBuf::from(trades_path),
-            book: Some(PathBuf::from(book_path)),
-            quotes: Some(PathBuf::from(quotes_path)),
-        };
+        // Build Strategy
+        let strategy = build_strategy(&cfg.strategy);
 
-        let mut tardis = TardisConnector::new(paths).unwrap();
-        let tx_tardis_updates = tx_exchange.clone();
-        let rx_tardis_cmd = tx_cmd.subscribe();
-        tokio::spawn(async move {
-            tardis.run(tx_tardis_updates, rx_tardis_cmd).await;
-        });
-
-        // // Bitmex connector
-        // let mut bitmex = BitmexConnector::default();
-        // let tx_bitmex_updates = tx_exchange.clone();
-        // let rx_bitmex_cmd = tx_cmd.subscribe();
-        // tokio::spawn(async move {
-        //     bitmex.run(tx_bitmex_updates, rx_bitmex_cmd).await;
-        // });
-        
-        // Avellaneda strategy
-        let mut strategy = AvellanedaStrategy::new(
-            "XBTUSDT".to_string(),
-            0.01,  // tick size
-            1,    // quote size
-            100,   // max position
-            0.1,   // gamma
-            0.2,   // delta
-            0.1,   // xi
-        );
         // fan-out executions to position engine and strategy
         let (tx_exec_strat, rx_exec_strat) = mpsc::channel::<ExecutionEvent>(100);
         let (tx_exec_pos, mut rx_exec_pos) = mpsc::channel::<ExecutionEvent>(100);
         let (tx_exec_out, mut rx_exec_out) = mpsc::channel::<ExecutionEvent>(100);
+
         // Spawn a task to forward executions to both strategy and position engine
         tokio::spawn(async move {
             while let Some(ex) = rx_exec.recv().await {
@@ -221,7 +187,7 @@ impl Engine {
             rx_engine,  //Receiver<AnyUpdate>,
             rx_order_exec,   //Receiver<Order>,
             tx_exec,    //Sender<ExecutionEvent>,
-            0,         //latency in ms
+            cfg.execution.latency_ms,         //latency in ms
         ));
 
         // Position engine
@@ -232,7 +198,7 @@ impl Engine {
         ));
 
         let (tx_output, mut rx_output) = mpsc::channel::<OutputEvent>(1000);
-        // Output channel fan-in
+        // Channel fan-in for Output writer
         tokio::spawn(async move {
             loop {
                 tokio::select! {
@@ -263,7 +229,6 @@ impl Engine {
 
         // Console Output sink
         let mut sink = Arc::new(ConsoleSink::new());
-        // let mut rx_csv = rx_output.clone();
         tokio::spawn(async move {
             while let Some(event) = rx_console.recv().await {
                 sink.handle(event).await;
@@ -271,7 +236,9 @@ impl Engine {
         });
 
         // CSV Output sink
-        let sink = SimpleCsvSink::new("/tmp/engine_output");
+        let sink = SimpleCsvSink::new(
+            cfg.output.csv_path.clone(),
+        );
         // Spawn the single task that handles all CSV writing
         tokio::spawn(async move {
             sink.run(rx_csv).await;

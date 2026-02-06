@@ -9,9 +9,12 @@ pub enum TransformerKind {
 }
 
 pub fn build_transformer(cfg: &StrategyConfig) -> Box<dyn DataTransformer> {
-    match cfg.kind.as_str() {
+    match cfg.features_type.as_str() {
         "momentum" => Box::new(PassThroughDataTransformer),
-        "avellaneda" => Box::new(AvellanedaDataTransformer { symbol: cfg.symbol.clone() }),
+        "avellaneda" => Box::new(AvellanedaDataTransformer { cfg: cfg.avellaneda.clone()
+                                                                    .expect("Avellaneda config must be set for Avellaneda strategy"),
+                                                            symbol: cfg.symbol.clone(),
+                                                         }),
         other => panic!("Unknown strategy kind: {}", other),
     }
 }

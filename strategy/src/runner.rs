@@ -3,8 +3,8 @@ use tokio;
 use crate::traits::Strategy;
 use common::{StrategyInput,AnyWsUpdate, Order, ExecutionEvent};
 
-pub async fn run_strategy<S: Strategy + 'static>(
-    mut strategy: S,
+pub async fn run_strategy(
+    mut strategy: Box<dyn Strategy + Send>,
     mut rx_market: mpsc::Receiver<StrategyInput>,
     mut rx_exec: mpsc::Receiver<ExecutionEvent>,
     tx_order: mpsc::Sender<Order>,
