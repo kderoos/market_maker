@@ -193,6 +193,7 @@ impl Engine {
         // Position engine
         let (tx_position, mut rx_position) = mpsc::channel::<common::PositionState>(500);
         tokio::spawn(run_position_engine(
+            cfg.position.clone(), //PositionEngineConfig,
             rx_exec_pos, //Receiver<ExecutionEvent>,
             tx_position,
         ));

@@ -7,14 +7,22 @@ use tokio::sync::mpsc;
 use tokio::sync::broadcast;
 use std::path::PathBuf;
 
+#[derive(Deserialize,Clone, Debug, PartialEq, Eq)]
+pub enum ContractType {
+    Linear,
+    Inverse,
+}
+
 #[derive(Clone, Debug)]
 pub struct PositionState {
+    pub inv_cost: f64, // sum of contracts * (1/price) for inverse positions
     pub timestamp: i64,
     pub position: i64,
     pub avg_price: f64,
     pub realized_pnl: f64,
     // pub unrealized_pnl: f64,
     pub cash: f64,
+    pub fees_paid: f64,
 }
 #[derive(Debug, Clone, Serialize)]
 pub struct AvellanedaInput {

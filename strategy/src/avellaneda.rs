@@ -163,7 +163,6 @@ impl Strategy for AvellanedaStrategy {
         let ask = ask.min(ba);
 
 
-
         // Inventory-aware quoting
         if self.position < self.max_position {
             orders.push(Order::Limit {
@@ -185,17 +184,13 @@ impl Strategy for AvellanedaStrategy {
                 ts_received: self.ts,
             });            
         }
-        // Debug
-        // println!(
-        //     "Avellaneda Strategy Quotes - Position: {}, Bid: {}, Ask: {}",
-        //     self.position, bid, ask
-        // );
+
 
         orders
     }
 
     fn on_fill(&mut self, fill: &ExecutionEvent) {
-        if fill.action == "Fill" {
+        if fill.action == "Full" {
             match fill.side {
                 OrderSide::Buy => self.position += fill.size,
                 OrderSide::Sell => self.position -= fill.size,

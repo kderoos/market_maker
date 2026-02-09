@@ -6,6 +6,7 @@ pub struct EngineConfig {
     pub data: DataConfig,
     pub execution: ExecutionConfig,
     pub output: OutputConfig,
+    pub position: PositionEngineConfig,
 }
 
 #[derive(Deserialize, Clone)]
@@ -77,4 +78,11 @@ pub struct ExecutionConfig {
 #[derive(Deserialize, Clone)]
 pub struct OutputConfig {
     pub csv_path: String,
+    pub candle_size_min: Option<u64>,
+}
+use common::ContractType;
+#[derive(Deserialize, Clone)]
+pub struct PositionEngineConfig {
+    pub contract_type: ContractType,
+    pub fee_rate: f64,
 }

@@ -12,6 +12,7 @@ use async_trait::async_trait;
 use common::{OrderSide,InstrumentData, Connector, ConnectorCommand, Subscription, AnyUpdate, QuoteUpdate, TradeUpdate, BookUpdate, BookEntry};
 use tokio::sync::mpsc;
 use tokio::sync::broadcast;
+use tracing::{info,debug,error};
 
 
 pub struct BitmexConnector{
@@ -58,12 +59,11 @@ impl Connector for BitmexConnector {
     }
 
     async fn run(&mut self, tx: mpsc::Sender<AnyUpdate>, mut rx: broadcast::Receiver<ConnectorCommand>) {
-        println!("BitMex connector starting...");
+        info!("BitMex connector starting...");
 
         // let url = "wss://ws.bitmex.com/realtime";
         let (ws_stream, _) = connect_async(&self.ws_url).await.expect("Failed to connect");
-        println!("Connected to BitMex WS");
-
+        info!("Connected to BitMex WS");
         let (mut write, mut read) = ws_stream.split();
         
         loop {
@@ -99,7 +99,7 @@ impl BitmexConnector {
                 if self.subscriptions.remove(&sub) {
                     let msg = format!(r#"{{"op":"unsubscribe","args":["{}:{}"]}}"#, sub.channel.to_bitmex(), sub.symbol);
                     write.send(Message::Text(msg)).await.unwrap();
-                    println!("[Bitmex] Unsubscribed from {}:{}", sub.channel.to_bitmex(), sub.symbol);
+                    debug!("[Bitmex] Unsubscribed from {}:{}", sub.channel.to_bitmex(), sub.symbol);
                     self.confirm_action_timeout(read).await;
                 }
             }
@@ -107,12 +107,12 @@ impl BitmexConnector {
                 for sub in self.subscriptions.iter() {
                     let msg = format!(r#"{{"op":"subscribe","args":["{}:{}"]}}"#, sub.channel.to_bitmex(), sub.symbol);
                     write.send(Message::Text(msg)).await.unwrap();
-                    println!("[Bitmex] Resubscribed to {}:{}", sub.channel.to_bitmex(), sub.symbol);
+                    debug!("[Bitmex] Resubscribed to {}:{}", sub.channel.to_bitmex(), sub.symbol);
                     self.confirm_action_timeout(read).await;
                 }
             }
             ConnectorCommand::Shutdown => {
-                println!("[Bitmex] Shutdown command received. Closing connection.");
+                debug!("[Bitmex] Shutdown command received. Closing connection.");
                 let msg = r#"{"op":"unsubscribe","args":["*"]}"#;
                 write.send(Message::Text(msg.into())).await.unwrap();
                 write.close().await.unwrap();
@@ -137,11 +137,9 @@ impl BitmexConnector {
             Ok(msg) => {
                 if msg.is_text() {
                     let text = msg.into_text().unwrap();
-                    //  println!("Raw WS message: {}", text);
                 
                     // Parse trade messages
                     if text.contains("\"table\":\"trade\"") {
-                        // println!("Parsing trade message: {}", text);
                         match serde_json::from_str::<BitmexTradeMsg>(&text) {
                             Ok(msg) => {
                                 if msg.table == "trade" && msg.action == "insert" {
@@ -154,9 +152,7 @@ impl BitmexConnector {
                                             exchange: "bitmex".into(),
                                             tick_size: tick_size,
                                             base:  ticker.market[0..3].to_string(), // e.g., "XBT" from "XBTUSDT"
-                                                                    //   .replace("XBT", "BTC"),
                                             quote:  ticker.market[3..].to_string(), // e.g., "USDT" from "XBTUSDT"
-                                                                    //   .replace("USDT", "USD"),    
                                             side: side,
                                             price: ticker.price,
                                             size: ticker.size as i64,
@@ -168,7 +164,7 @@ impl BitmexConnector {
                                 }
                             }
                             Err(e) => {  
-                                eprintln!("Failed to parse BitmexTradeMsg: {}", e);
+                                error!("Failed to parse BitmexTradeMsg: {}", e);
                             }
                         }
                     } else
@@ -198,11 +194,10 @@ impl BitmexConnector {
                                 }
                             }
                             Err(e) => {  
-                                eprintln!("Failed to parse BitmexQuoteMsg: {}", e);
+                                error!("Failed to parse BitmexQuoteMsg: {}", e);
                             }
                         }
                     } else if text.contains("\"table\":\"orderBookL2\"") {
-                        // println!("Received orderBookL2 message (not processed): {}", text);
                        match serde_json::from_str::<BitmexOrderBookMsg>(&text) {
                             Ok(msg) => {
                                 if msg.table == "orderBookL2" {
@@ -230,14 +225,14 @@ impl BitmexConnector {
                                 }
                             }
                             Err(e) => {  
-                                eprintln!("Failed to parse BitmexOrderBookMsg: {}", e);
+                                error!("Failed to parse BitmexOrderBookMsg: {}", e);
                             }
                         } 
                     }
                 }
             }
             Err(e) => {
-                eprintln!("Error receiving message: {}", e);
+                error!("Error receiving message: {}", e);
                 // break;
             }
         }
@@ -256,23 +251,19 @@ impl BitmexConnector {
                     if msg.is_text() {
                         let text = msg.into_text().unwrap();
                         if text.contains("\"success\"") {
-                            println!("[Bitmex] Action confirmed: {}", text);
+                            debug!("[Bitmex] Action confirmed: {}", text);
                             confirmed = true;
                         }
-                        // if text.contains("\"success\":true") && text.contains(&format!("\"subscribe\":\"{}:{}\"", sub.channel.to_bitmex(), sub.symbol)) {
-                            // println!("[Bitmex] Subscription to {}:{} confirmed.", sub.channel.to_bitmex(), sub.symbol);
-                            // confirmed = true;
-                        // }
                     }
                 }
                 Ok(Some(Err(e))) => {
-                    eprintln!("Error receiving confirmation: {}", e);
+                    error!("Error receiving confirmation: {}", e);
                 }
                 Ok(None) => {
-                    eprintln!("Connection closed before confirmation");
+                    error!("Connection closed before confirmation");
                 }
                 Err(_) => {
-                    eprintln!("Timeout waiting for subscription confirmation");
+                    error!("Timeout waiting for subscription confirmation");
                     break;
                 }
             }

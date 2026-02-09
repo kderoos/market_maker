@@ -16,8 +16,8 @@ impl OutputSink for ConsoleSink {
         match event {
             OutputEvent::Position(pos) => {
                 println!(
-                    "[POSITION] ts={} position={} avg_price={} realized_pnl={} cash={}",
-                    pos.timestamp, pos.position, pos.avg_price, pos.realized_pnl, pos.cash
+                    "[POSITION] ts={} position={} avg_price={} realized_pnl={}, cash={}, fees_paid= {}",
+                    pos.timestamp, pos.position, pos.avg_price, pos.realized_pnl, pos.cash, pos.fees_paid
                 );
             }
             _ => {}
