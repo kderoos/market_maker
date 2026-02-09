@@ -476,9 +476,7 @@ mod tests {
         // Net PnL = Gross PnL - Fees = 0.02223 - 0.0002322 = 0.0219978
 
         assert!((s.realized_pnl - 0.02223).abs() < 1e-4 );
-        // assert_eq!(s.realized_pnl,0.02223);
         assert!((s.fees_paid - 0.0002322).abs() < 1e-6);
-        // assert_eq!(s.fees_paid,0.0002322);
         assert!((s.cash - 0.0219978).abs() < 1e-4);
     }
 

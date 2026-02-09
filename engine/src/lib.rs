@@ -27,7 +27,7 @@ use output::event::OutputEvent;
 use output::sink::OutputSink;
 use output::csv::SimpleCsvSink;
 use features::{build::build_transformer, transform::DataTransformer, passthrough::PassThroughDataTransformer, sequenced::AvellanedaDataTransformer};
-use config::EngineConfig;
+use config::{EngineConfig, DataPreprocessingType};
 use std::path::PathBuf;
 use tracing_subscriber;
 use tracing::info;
@@ -59,13 +59,12 @@ impl Engine {
         let book_state = Arc::new(RwLock::new(OrderBook::default()));
 
         // Spawn data transformer to get in/output channels.
-        let transformer: Box<dyn DataTransformer> = match cfg.strategy.features_type.as_str() {
-            "momentum" => Box::new(PassThroughDataTransformer),
-            "avellaneda" => Box::new(AvellanedaDataTransformer { cfg: cfg.strategy.avellaneda.clone()
+        let transformer: Box<dyn DataTransformer> = match cfg.strategy.preprocessing {
+            DataPreprocessingType::NoDataTransform => Box::new(PassThroughDataTransformer),
+            DataPreprocessingType::Avellaneda => Box::new(AvellanedaDataTransformer { cfg: cfg.strategy.avellaneda.clone()
                                                                     .expect("Avellaneda config must be set for Avellaneda strategy"),
                                                                 symbol: cfg.strategy.symbol.clone()
                                                              }),
-            other => panic!("Unknown strategy kind: {}", other),
         };
 
         let (tx_transformer, rx_strategy) = transformer.spawn();

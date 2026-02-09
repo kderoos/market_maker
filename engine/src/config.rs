@@ -8,12 +8,23 @@ pub struct EngineConfig {
     pub output: OutputConfig,
     pub position: PositionEngineConfig,
 }
+#[derive(Deserialize, Clone)]
+pub enum DataPreprocessingType {
+    Avellaneda,
+    NoDataTransform,
+}
+
+#[derive(Deserialize, Clone)]
+pub enum StrategyType {
+    Avellaneda,
+    // Momentum,
+}
 
 #[derive(Deserialize, Clone)]
 pub struct StrategyConfig {
-    pub features_type: String, // "avellaneda", "momentum", etc
+    pub kind: StrategyType, // "avellaneda", "momentum", etc
+    pub preprocessing: DataPreprocessingType, // "avellaneda", "momentum", etc
     pub symbol: String,
-
     pub avellaneda: Option<AvellanedaConfig>,
     pub momentum: Option<MomentumConfig>,
 }

@@ -12,7 +12,8 @@ latency_ms = 0
 csv_path = "/tmp/engine_output"
 
 [strategy]
-features_type = "avellaneda"
+kind = "Avellaneda"
+preprocessing = "Avellaneda"
 symbol = "XBTUSDT"
 
 [strategy.avellaneda]
