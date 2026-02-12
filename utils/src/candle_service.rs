@@ -1,6 +1,7 @@
 use tokio::sync::mpsc::{Receiver, Sender};
 use crate::candles::{CandleAggregator};
 use common::{Candle,AnyWsUpdate, TradeUpdate, OrderSide};
+use tracing::info;
 
 /// CandleServiceActor is responsible for converting incoming Trade updates
 /// into completed OHLCV candles and publishing them downstream.
@@ -51,9 +52,9 @@ impl CandleService {
     }
 
     async fn handle_trade(&mut self, trade: TradeUpdate) {
-        if trade.base.clone() + &trade.quote != self.symbol {
-            return;
-        }
+        // if trade.base.clone() + &trade.quote != self.symbol {
+        //     return;
+        // }
 
         if let Some(candle) = self.candle_agg.on_trade(&trade) {
             let _ = self

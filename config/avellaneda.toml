@@ -10,6 +10,9 @@ latency_ms = 0
 
 [output]
 csv_path = "/tmp/engine_output"
+exchange = "bitmex"
+date = "01_08_2024"
+candle_size_min = 1
 
 [strategy]
 kind = "Avellaneda"

@@ -1,6 +1,6 @@
-use serde::Deserialize;
+use serde::{Serialize,Deserialize};
 
-#[derive(Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct EngineConfig {
     pub strategy: StrategyConfig,
     pub data: DataConfig,
@@ -8,19 +8,19 @@ pub struct EngineConfig {
     pub output: OutputConfig,
     pub position: PositionEngineConfig,
 }
-#[derive(Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone)]
 pub enum DataPreprocessingType {
     Avellaneda,
     NoDataTransform,
 }
 
-#[derive(Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone)]
 pub enum StrategyType {
     Avellaneda,
     // Momentum,
 }
 
-#[derive(Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct StrategyConfig {
     pub kind: StrategyType, // "avellaneda", "momentum", etc
     pub preprocessing: DataPreprocessingType, // "avellaneda", "momentum", etc
@@ -29,7 +29,7 @@ pub struct StrategyConfig {
     pub momentum: Option<MomentumConfig>,
 }
 
-#[derive(Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct AvellanedaConfig {
     pub tick_size: f64,
     pub quote_size: i64,
@@ -44,13 +44,13 @@ pub struct AvellanedaConfig {
     pub sequencer: SequencerConfig,
 }
 
-#[derive(Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct MomentumConfig {
     pub lookback: usize,
     pub threshold: f64,
 }
 
-#[derive(Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct VolatilityConfig {
     pub window_len: usize,
     pub interval_s: f64,
@@ -59,19 +59,19 @@ pub struct VolatilityConfig {
     pub sigma_max: Option<f64>,
 }
 
-#[derive(Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct PenetrationConfig {
     pub window_len: usize,
     pub num_bins: usize,
     pub interval_ms: i64,
 }
 
-#[derive(Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct SequencerConfig {
     pub interval_ms: i64,
 }
 
-#[derive(Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct DataConfig {
     pub from_csv: bool,
     pub bitmex_api: Option<String>,
@@ -81,18 +81,20 @@ pub struct DataConfig {
     pub book_csv: Option<String>,
 }
 
-#[derive(Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct ExecutionConfig {
     pub latency_ms: i64,
 }
 
-#[derive(Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct OutputConfig {
     pub csv_path: String,
+    pub exchange: String,
+    pub date: String,
     pub candle_size_min: Option<u64>,
 }
 use common::ContractType;
-#[derive(Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct PositionEngineConfig {
     pub contract_type: ContractType,
     pub fee_rate: f64,

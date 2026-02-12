@@ -7,7 +7,7 @@ use tokio::sync::mpsc;
 use tokio::sync::broadcast;
 use std::path::PathBuf;
 
-#[derive(Deserialize,Clone, Debug, PartialEq, Eq)]
+#[derive(Serialize,Deserialize,Clone, Debug, PartialEq, Eq)]
 pub enum ContractType {
     Linear,
     Inverse,

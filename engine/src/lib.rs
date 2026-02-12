@@ -18,7 +18,7 @@ use common::{Order, ExecutionEvent, Connector, AnyWsUpdate, AnyUpdate, ChannelTy
 use connectors_bitmex::BitmexConnector;
 use connectors_bitvavo::BitvavoConnector;
 use connectors_tardis::TardisConnector;
-use utils::forward::ws_forward_trade_quote;
+use utils::{forward::ws_forward_trade_quote, candle_service::CandleService};
 use strategy::{sequencer,runner::run_strategy, avellaneda::AvellanedaStrategy};
 use position::run_position_engine;
 use execution::run_deterministic;
@@ -55,6 +55,8 @@ impl Engine {
         let (tx_trade_exe, rx_trade_exe) = mpsc::channel::<AnyUpdate>(2000);
         let (tx_engine, rx_engine) = mpsc::channel::<AnyUpdate>(5000);
         let (tx_transformer, rx_transformer) = mpsc::channel::<AnyUpdate>(5000);
+        // channel for candle service
+        let (tx_candle_in, rx_candle_in) = mpsc::channel::<AnyWsUpdate>(500);
 
         let book_state = Arc::new(RwLock::new(OrderBook::default()));
 
@@ -83,9 +85,11 @@ impl Engine {
                                 let _ = tx_engine.send(update.clone()).await;
                                 let _ = tx_transformer.send(update.clone()).await;
                             }
-                            AnyUpdate::TradeUpdate(_) => {
+                            AnyUpdate::TradeUpdate(t) => {
                                 let _ = tx_engine.send(update.clone()).await;
                                 let _ = tx_transformer.send(update.clone()).await;
+                                let u = AnyWsUpdate::Trade(t.clone());
+                                let _ = tx_candle_in.send(u).await;
                             }
                             AnyUpdate::QuoteUpdate(quote) => {
                                 let _ = tx_transformer.send(update.clone()).await;
@@ -98,6 +102,17 @@ impl Engine {
                 }
             }
         });
+        let (tx_candle_out, mut rx_candle_out) = mpsc::channel::<AnyWsUpdate>(100);
+        // Spawn candle service
+        if cfg.output.candle_size_min.is_some() {
+            info!("Starting candle service with {} min candles...", cfg.output.candle_size_min.unwrap());
+            let candle_service = CandleService::new(cfg.strategy.symbol.clone(),
+                                                1000*60*cfg.output.candle_size_min.unwrap() as i64, // 15 min candles
+                                                rx_candle_in,
+                                                tx_candle_out);
+            candle_service.spawn();        
+        }
+
 
         // // spawn execution engine
         let (tx_exec, mut rx_exec) = mpsc::channel::<ExecutionEvent>(100);
@@ -108,9 +123,9 @@ impl Engine {
             info!("Starting Tardis connector from CSV files...");
             // Build file paths from config
             let data_root = cfg.data.tardis_root.clone().expect("data_root must be set for CSV data source");
-            let trades_path = data_root.clone() + cfg.data.trades_csv.expect("missing filename trades_csv").as_str();
-            let quotes_path = data_root.clone() + cfg.data.quotes_csv.expect("missing filename quotes_csv").as_str();
-            let book_path = data_root.clone() + cfg.data.book_csv.expect("missing filename book_csv").as_str();
+            let trades_path = data_root.clone() + cfg.data.trades_csv.as_ref().expect("missing filename trades_csv").as_str();
+            let quotes_path = data_root.clone() + cfg.data.quotes_csv.as_ref().expect("missing filename quotes_csv").as_str();
+            let book_path = data_root.clone() + cfg.data.book_csv.as_ref().expect("missing filename book_csv").as_str();
             // Define Tardis paths
             let paths = common::TardisPaths {
                 trades: PathBuf::from(trades_path),
@@ -214,6 +229,16 @@ impl Engine {
                         let output_event = OutputEvent::Trade(ex);
                         let _ = tx_output.send(output_event).await;
                     }
+                    Some(c) = rx_candle_out.recv() => {
+                        println!("Received candle from candle service: {:?}", c);
+                        let c = match c {
+                            AnyWsUpdate::TradeCandle(c) => {
+                                c
+                            },
+                            _ => continue,
+                        };
+                        let output_event = OutputEvent::Price(c);
+                        let _ = tx_output.send(output_event).await;}
                 }
             }
         });
@@ -234,10 +259,17 @@ impl Engine {
                 sink.handle(event).await;
             }
         });
-
+        // Build output directory if it doesn't exist
+        std::fs::create_dir_all(&cfg.output.csv_path).expect("Failed to create output directory");
+        // Filename for CSV output
+        let filename_prefix = select_next_filename(&cfg.output.csv_path, &cfg.output.exchange, &cfg.strategy.symbol, &cfg.output.date);
+        let base_path = PathBuf::from(&cfg.output.csv_path);
+        // write config
+        write_final_config(&cfg, &base_path, &filename_prefix).expect("Failed to write config");
         // CSV Output sink
         let sink = SimpleCsvSink::new(
-            cfg.output.csv_path.clone(),
+            base_path,
+            &filename_prefix,
         );
         // Spawn the single task that handles all CSV writing
         tokio::spawn(async move {
@@ -254,4 +286,29 @@ impl Engine {
     pub fn send_cmd(&self, cmd: ConnectorCommand) {
         let _ = self.tx_cmd.send(cmd);
     }
+}
+
+fn select_next_filename(base_path: &str, exchange: &str, symbol: &str, date: &str) -> String {
+    let mut run_id = 0;
+    loop {
+        let filename = format!("{}_{}_{}_run{}_config.toml", exchange, symbol, date, run_id);
+        let path = PathBuf::from(base_path).join(filename);
+        if !path.exists() {
+            break;
+        }
+        run_id += 1;
+    }
+    format!("{}_{}_{}_run{}", exchange, symbol, date, run_id)
+}
+use std::fs::File;
+use std::io::Write;
+use toml;
+
+fn write_final_config(cfg: &EngineConfig, base_path: &PathBuf, filename_prefix: &str) -> std::io::Result<()> {
+    let path = base_path.join(format!("{}_config.toml", filename_prefix));
+    let toml = toml::to_string_pretty(cfg).expect("Failed to serialize config");
+    info!("Writing config to: {}", path.display());
+    let mut f = File::create(path)?;
+    f.write_all(toml.as_bytes())?;
+    Ok(())
 }

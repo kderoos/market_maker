@@ -19,7 +19,7 @@ impl CandleAggregator {
     /// - Some(candle) when a candle is finished
     /// - None when still accumulating
     pub fn on_trade(&mut self, trade: &TradeUpdate) -> Option<Candle> {
-        let bucket = trade.ts_received / self.interval_ms;
+        let bucket = trade.ts_received / (self.interval_ms * 1000);
 
         // Set symbol if not already set
         if self.symbol.is_none() {
@@ -27,7 +27,7 @@ impl CandleAggregator {
         }
 
         // Candle start timestamp
-        let ts_open = bucket * self.interval_ms;
+        let ts_open = bucket * (self.interval_ms * 1000);
 
         match &mut self.current {
             None => {

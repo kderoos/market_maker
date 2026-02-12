@@ -174,8 +174,6 @@ pub async fn engine(
     let interval_us = interval_ms * us_per_ms;
 
 
-    println!("Penetration engine started for symbol {}", symbol);
-
     while let Some(update) = rx.recv().await {
         match update {
             AnyUpdate::TradeUpdate(trade) => {
