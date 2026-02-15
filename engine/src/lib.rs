@@ -1,3 +1,38 @@
+//! Core asynchronous trading engine.
+//!
+//! The engine wires together:
+//! - Market data connectors (live or historical replay)
+//! - Optional data preprocessing pipeline
+//! - Strategy evaluation
+//! - Deterministic execution simulator
+//! - Position tracking
+//! - Output sinks (console / CSV)
+//!
+//! The architecture is message-driven and built around bounded
+//! Tokio mpsc and broadcast channels to enforce backpressure
+//! and deterministic replay semantics.
+//!
+//! # Engine Architecture
+//!
+//! ## Data Flow
+//!
+//! Connector → tx_exchange (mpsc)
+//!     → fan-out task
+//!         → tx_engine (execution engine)
+//!         → tx_transformer (strategy preprocessing)
+//!         → tx_candle_in (candle service)
+//!
+//! Execution Engine
+//!     → ExecutionEvent
+//!         → Strategy
+//!         → Position Engine
+//!         → Output
+//!
+//! Strategy
+//!     → Order
+//!         → Execution Engine
+//!         → Output
+
 pub mod book;
 pub mod output;
 mod features;
@@ -9,32 +44,49 @@ mod position;
 pub mod strategy_factory;
 pub mod execution;
 
-use book::{book_engine, print_book,pub_book_depth, OrderBook};
+use std::{
+    fs::File,
+    io::Write,
+    path::PathBuf,
+    sync::Arc,
+};
 
-use std::collections::HashMap;
-use std::sync::{Arc};
-use tokio::sync::{RwLock,mpsc,broadcast};
-use common::{Order, ExecutionEvent, Connector, AnyWsUpdate, AnyUpdate, ChannelType, ConnectorCommand};
-use connectors_bitmex::BitmexConnector;
-use connectors_bitvavo::BitvavoConnector;
-use connectors_tardis::TardisConnector;
-use utils::{forward::ws_forward_trade_quote, candle_service::CandleService};
-use strategy::{sequencer,runner::run_strategy, avellaneda::AvellanedaStrategy};
-use position::run_position_engine;
-use execution::run_deterministic;
-use output::console::ConsoleSink;
-use output::event::OutputEvent;
-use output::sink::OutputSink;
-use output::csv::SimpleCsvSink;
-use features::{build::build_transformer, transform::DataTransformer, passthrough::PassThroughDataTransformer, sequenced::AvellanedaDataTransformer};
-use config::{EngineConfig, DataPreprocessingType};
-use std::path::PathBuf;
-use tracing_subscriber;
+use tokio::sync::{broadcast, mpsc, RwLock};
 use tracing::info;
+
+use common::{
+    AnyUpdate, AnyWsUpdate, ChannelType, ConnectorCommand,
+    ExecutionEvent, Order, Connector
+};
+
+use book::OrderBook;
+use config::{DataPreprocessingType, EngineConfig};
+use connectors_bitmex::BitmexConnector;
+use connectors_tardis::TardisConnector;
+use execution::run_deterministic;
+use features::{
+    passthrough::PassThroughDataTransformer,
+    sequenced::AvellanedaDataTransformer,
+    transform::DataTransformer,
+};
+use output::{
+    console::ConsoleSink,
+    csv::SimpleCsvSink,
+    event::OutputEvent,
+    sink::OutputSink
+};
+use position::run_position_engine;
+use strategy::runner::run_strategy;
 use strategy_factory::build_strategy;
+use utils::candle_service::CandleService;
 
-use volatility::run_tick_volatility_sample_ema;
-
+/// Central orchestration struct for the trading engine.
+///
+/// `Engine` owns the command broadcast channel and
+/// initializes all async subsystems.
+///
+/// It does not perform trading logic itself —
+/// it wires together independent tasks.
 pub struct Engine {
     tx_cmd: broadcast::Sender<ConnectorCommand>,
     pub tx_ws: broadcast::Sender<AnyWsUpdate>,
@@ -42,31 +94,63 @@ pub struct Engine {
 }
 
 impl Engine {
+    /// Initializes and spawns all engine subsystems.
+    ///
+    /// Responsibilities:
+    /// - Create bounded async channels
+    /// - Spawn connector (live or CSV replay)
+    /// - Spawn preprocessing pipeline
+    /// - Spawn strategy runner
+    /// - Spawn deterministic execution engine
+    /// - Spawn position engine
+    /// - Spawn output sinks
+    ///
+    /// # Determinism
+    /// In backtest mode, replay order is preserved via single-threaded
+    /// event routing and bounded channels.
+    ///
+    /// # Panics
+    /// May panic if required configuration fields are missing.
     pub fn init(cfg: EngineConfig) -> Self {
         info!("Initializing engine...");
-        // let (tx_exchange, rx_exchange) = broadcast::channel(1000);
+
+        // ---- Channel Topology ----
+        // Exchange updates → execution + transformer
+        // Strategy orders → execution
+        // Execution events → strategy + position + output
+        // Output events → console + CSV
+
         let (tx_exchange, rx_exchange) = mpsc::channel::<AnyUpdate>(10_000);
-        // broadcast channels for commands and ws updates
+        
+        // broadcast channels for commands and ws updates.
         let (tx_cmd, _) = broadcast::channel::<ConnectorCommand>(100);
         let (tx_ws, _) = broadcast::channel::<AnyWsUpdate>(1000);
         let (tx_mid_price, _) = broadcast::channel::<AnyWsUpdate>(1000);
-        // mpsc channel for consumers of exchange updates
+        
+        // mpsc channel for consumers of exchange updates.
         let (tx_book, rx_book) = mpsc::channel::<AnyUpdate>(5000);
         let (tx_trade_exe, rx_trade_exe) = mpsc::channel::<AnyUpdate>(2000);
         let (tx_engine, rx_engine) = mpsc::channel::<AnyUpdate>(5000);
-        let (tx_transformer, rx_transformer) = mpsc::channel::<AnyUpdate>(5000);
-        // channel for candle service
+        
+        // channel for candle service.
         let (tx_candle_in, rx_candle_in) = mpsc::channel::<AnyWsUpdate>(500);
 
+        // Create new orderbook.
         let book_state = Arc::new(RwLock::new(OrderBook::default()));
 
         // Spawn data transformer to get in/output channels.
         let transformer: Box<dyn DataTransformer> = match cfg.strategy.preprocessing {
-            DataPreprocessingType::NoDataTransform => Box::new(PassThroughDataTransformer),
-            DataPreprocessingType::Avellaneda => Box::new(AvellanedaDataTransformer { cfg: cfg.strategy.avellaneda.clone()
-                                                                    .expect("Avellaneda config must be set for Avellaneda strategy"),
-                                                                symbol: cfg.strategy.symbol.clone()
-                                                             }),
+            DataPreprocessingType::NoDataTransform => {
+                Box::new(PassThroughDataTransformer)
+            }
+            DataPreprocessingType::Avellaneda => {
+                Box::new(AvellanedaDataTransformer {
+                    cfg: cfg.strategy.avellaneda
+                        .clone()
+                        .expect("Avellaneda config must be set"),
+                    symbol: cfg.strategy.symbol.clone(),
+                })
+            }
         };
 
         let (tx_transformer, rx_strategy) = transformer.spawn();
@@ -104,10 +188,10 @@ impl Engine {
         });
         let (tx_candle_out, mut rx_candle_out) = mpsc::channel::<AnyWsUpdate>(100);
         // Spawn candle service
-        if cfg.output.candle_size_min.is_some() {
-            info!("Starting candle service with {} min candles...", cfg.output.candle_size_min.unwrap());
+        if let Some(candle_size) = cfg.output.candle_size_min {
+            info!("Starting candle service with {} min candles...", candle_size);
             let candle_service = CandleService::new(cfg.strategy.symbol.clone(),
-                                                1000*60*cfg.output.candle_size_min.unwrap() as i64, // 15 min candles
+                                                1000*60*candle_size as i64, // convert to microsecond.
                                                 rx_candle_in,
                                                 tx_candle_out);
             candle_service.spawn();        
@@ -123,9 +207,14 @@ impl Engine {
             info!("Starting Tardis connector from CSV files...");
             // Build file paths from config
             let data_root = cfg.data.tardis_root.clone().expect("data_root must be set for CSV data source");
-            let trades_path = data_root.clone() + cfg.data.trades_csv.as_ref().expect("missing filename trades_csv").as_str();
-            let quotes_path = data_root.clone() + cfg.data.quotes_csv.as_ref().expect("missing filename quotes_csv").as_str();
-            let book_path = data_root.clone() + cfg.data.book_csv.as_ref().expect("missing filename book_csv").as_str();
+            let trades_path = PathBuf::from(&data_root)
+                .join(cfg.data.trades_csv.as_ref().expect("missing trades_csv"));
+            let quotes_path = PathBuf::from(&data_root)
+                .join(cfg.data.quotes_csv.as_ref().expect("missing trades_csv"));           
+            let book_path = PathBuf::from(&data_root)
+                .join(cfg.data.book_csv.as_ref().expect("missing trades_csv"));           
+            
+
             // Define Tardis paths
             let paths = common::TardisPaths {
                 trades: PathBuf::from(trades_path),
@@ -201,7 +290,7 @@ impl Engine {
             rx_engine,  //Receiver<AnyUpdate>,
             rx_order_exec,   //Receiver<Order>,
             tx_exec,    //Sender<ExecutionEvent>,
-            cfg.execution.latency_ms,         //latency in ms
+            cfg.execution.latency_ms,//latency in ms
         ));
 
         // Position engine
@@ -282,11 +371,15 @@ impl Engine {
         }
     }
 
+    /// Sends a command to the active connector via broadcast channel.
+    /// Typically used to subscribe/unsubscribe to market data streams.
     pub fn send_cmd(&self, cmd: ConnectorCommand) {
         let _ = self.tx_cmd.send(cmd);
     }
 }
 
+/// Generates a unique filename prefix by incrementing a run ID
+/// if files already exist in the output directory.
 fn select_next_filename(base_path: &str, exchange: &str, symbol: &str, date: &str) -> String {
     let mut run_id = 0;
     loop {
@@ -299,10 +392,9 @@ fn select_next_filename(base_path: &str, exchange: &str, symbol: &str, date: &st
     }
     format!("{}_{}_{}_run{}", exchange, symbol, date, run_id)
 }
-use std::fs::File;
-use std::io::Write;
-use toml;
 
+/// Writes the effective runtime configuration to disk
+/// alongside output results for reproducibility.
 fn write_final_config(cfg: &EngineConfig, base_path: &PathBuf, filename_prefix: &str) -> std::io::Result<()> {
     let path = base_path.join(format!("{}_config.toml", filename_prefix));
     let toml = toml::to_string_pretty(cfg).expect("Failed to serialize config");

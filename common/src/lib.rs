@@ -1,3 +1,30 @@
+//! # Common Domain Types
+//!
+//! This module defines the canonical domain types shared across all crates:
+//!
+//! - Market data updates
+//! - Orders and executions
+//! - Strategy inputs
+//! - Position state
+//! - Connector commands
+//!
+//! These types form the protocol boundary between:
+//! - Connectors
+//! - Engine
+//! - Strategy
+//! - Execution model
+//! - Position engine
+//! - Output sinks
+//!
+//! ## Design Principles
+//!
+//! - Types are immutable once emitted.
+//! - Ordering of events is preserved by channels.
+//! - `ts_received` represents engine-observed time.
+//! - `ts_exchange` represents exchange event time (if available).
+//!
+//! Changing these types changes system semantics.
+
 pub mod types;
 pub use types::{ChannelType, QuoteUpdate, BookUpdate, BookEntry};
 
@@ -20,7 +47,6 @@ pub struct PositionState {
     pub position: i64,
     pub avg_price: f64,
     pub realized_pnl: f64,
-    // pub unrealized_pnl: f64,
     pub cash: f64,
     pub fees_paid: f64,
 }

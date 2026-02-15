@@ -76,7 +76,7 @@ mod tests {
         let (tx_in, rx_in) = mpsc::channel(100);
         let (tx_out, mut rx_out) = mpsc::channel(100);
         let symbol = "BTCUSDT".to_string();
-        let interval_ms = 1000; // 1 second candles
+        let interval_ms = 1; // 1 ms candles
         let candle_service = CandleService::new(symbol.clone(), interval_ms, rx_in, tx_out);
         candle_service.spawn();
         // Send some trade updates
@@ -120,7 +120,7 @@ mod tests {
             let _ = tx_in.send(AnyWsUpdate::Trade(trade)).await;
         }
         // Expect one completed candle
-        let msg = timeout(Duration::from_secs(2), rx_out.recv())
+        let msg = timeout(Duration::from_secs(1), rx_out.recv())
             .await
             .expect("Timed out waiting for candle")
             .expect("No candle received");

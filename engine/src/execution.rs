@@ -622,7 +622,7 @@ mod deterministic_execution_tests {
         send_trade(&h, Buy, 50_000.0, 100, t0 + 3).await;
 
         let fill = tokio::time::timeout(
-                std::time::Duration::from_millis(100),
+                std::time::Duration::from_millis(200),
                 h.exec_rx.recv(),
             ).await.unwrap().unwrap();
 

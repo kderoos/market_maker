@@ -1,3 +1,14 @@
+//! Binary entrypoint for the market-making engine.
+//!
+//! Responsibilities:
+//! - Parse CLI arguments (live / backtest).
+//! - Load and optionally override `EngineConfig` from TOML.
+//! - Initialize logging via `tracing`.
+//! - Bootstrap the async engine runtime.
+//!
+//! All trading logic, execution modeling, and strategy behavior
+//! reside in the `engine` crate.
+
 use std::fs;
 use std::path::PathBuf;
 
@@ -46,12 +57,20 @@ enum Commands {
         output: Option<PathBuf>,
     },
 }
-
+/// Loads and deserializes the engine configuration from a TOML file.
+///
+/// # Panics
+/// Panics if the file cannot be read or if deserialization fails.
 fn load_config(path: &PathBuf) -> EngineConfig {
     let text = fs::read_to_string(path).expect("Failed to read config");
     toml::from_str(&text).expect("Invalid config.toml")
 }
-
+/// Application entrypoint.
+///
+/// Initializes logging, parses CLI arguments, applies runtime
+/// configuration overrides, and starts the engine.
+///
+/// The process runs indefinitely until externally terminated.
 #[tokio::main]
 async fn main() {
     // Default to INFO log level unless RUST_LOG is set.
@@ -115,7 +134,9 @@ async fn main() {
             Engine::init(cfg)
         }
     };
-    // Keep process alive
-    futures::future::pending::<()>().await;
-}
+    /// The runtime blocks until a Ctrl+C signal is received.
+    tokio::signal::ctrl_c()
+        .await
+        .expect("Failed to listen for shutdown signal");
+    }
  
