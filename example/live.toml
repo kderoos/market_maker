@@ -1,0 +1,42 @@
+[strategy]
+kind = "Avellaneda"
+preprocessing = "Avellaneda"
+symbol = "XBTUSDT"
+
+[strategy.avellaneda]
+tick_size = 0.01
+quote_size = 100
+max_position = 1000
+gamma = 0.1
+delta = 0.2
+xi = 0.1
+
+[strategy.avellaneda.vol]
+window_len = 500
+interval_s = 0.5
+ema_half_life = 2.0
+
+[strategy.avellaneda.penetration]
+window_len = 120
+num_bins = 500
+interval_ms = 500
+
+[strategy.avellaneda.sequencer]
+interval_ms = 500
+
+[data]
+from_csv = false
+
+[execution]
+latency_ms = 0
+
+[output]
+csv_path = "example/live_run/"
+exchange = "bitmex"
+date = ""
+candle_size_min = 1
+
+[position]
+contract_type = "Inverse"
+fee_rate = 0.0005
+
