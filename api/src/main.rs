@@ -1,22 +1,3 @@
-// Here is the old main.rs that did work.
-// use std::fs;
-// use engine::{config::EngineConfig, Engine};
-// use tracing_subscriber;
-
-// pub fn load_config(path: &str) -> EngineConfig {
-//     let text = fs::read_to_string(path).expect("Failed to read config");
-//     toml::from_str(&text).expect("Invalid config.toml")
-// }
-// #[tokio::main]
-// pub async fn main() {
-//     tracing_subscriber::fmt::init();
-//     let cfg = load_config("./config/avellaneda.toml");
-//     let engine = Engine::init(cfg);
-
-//     // Keep process alive
-//     futures::future::pending::<()>().await;
-// }
-
 use std::fs;
 use std::path::PathBuf;
 
@@ -73,7 +54,16 @@ fn load_config(path: &PathBuf) -> EngineConfig {
 
 #[tokio::main]
 async fn main() {
-    tracing_subscriber::fmt::init();
+    // Default to INFO log level unless RUST_LOG is set.
+    use tracing_subscriber::{fmt, EnvFilter};
+
+    fmt()
+        .with_env_filter(
+            EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| EnvFilter::new("info"))
+        )
+        .init();
+
 
     let cli = Cli::parse();
 

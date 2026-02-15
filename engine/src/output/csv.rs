@@ -4,6 +4,7 @@ use std::io::{BufWriter, Write};
 use std::path::PathBuf;
 use tokio::sync::mpsc;
 use tokio::time::{sleep, Duration};
+use tracing::{info,error};
 
 struct CsvFile {
     writer: BufWriter<std::fs::File>,
@@ -12,7 +13,7 @@ struct CsvFile {
 
 impl CsvFile {
     fn new(path: PathBuf, header: &str) -> Self {
-        println!("Creating CSV file at: {}", path.display());
+        info!("Creating CSV file at: {}", path.display());
         let file = OpenOptions::new()
             .append(true)
             .create(true)
@@ -36,11 +37,11 @@ impl CsvFile {
     }
     fn push_single_line(&mut self, line: String) {
         if let Err(e) = writeln!(self.writer, "{}", line) {
-            eprintln!("csv write error: {}", e);
+            error!("csv write error: {}", e);
             return;
         }
         if let Err(e) = self.writer.flush() {
-            eprintln!("csv flush error: {}", e);
+            error!("csv flush error: {}", e);
         }
     }
 

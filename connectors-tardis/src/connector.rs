@@ -1,5 +1,4 @@
 use crate::cursor::merge::{MergeCursor,EventCursor};
-// use crate::normalize::normalize;
 use async_trait::async_trait;
 use common::{AnyUpdate, Connector, ConnectorCommand, TardisPaths};
 use tokio::sync::{broadcast,mpsc};
@@ -55,7 +54,11 @@ impl Connector for TardisConnector {
 
             let event = match self.cursor.next() {
                 Ok(Some(e)) => e,  // event
-                Ok(None) => break, // EOF
+                
+                Ok(None) => {
+                    tracing::info!("TardisConnector reached end of file, press ctr-C to exit");
+                    break; // EOF
+                },
                 Err(e) => {
                     tracing::error!("TardisConnector cursor error: {:#?}", e);
                     break;

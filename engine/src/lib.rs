@@ -230,7 +230,6 @@ impl Engine {
                         let _ = tx_output.send(output_event).await;
                     }
                     Some(c) = rx_candle_out.recv() => {
-                        println!("Received candle from candle service: {:?}", c);
                         let c = match c {
                             AnyWsUpdate::TradeCandle(c) => {
                                 c

@@ -1,6 +1,7 @@
 use common::{VolatilityUpdate, PenetrationUpdate, QuoteUpdate, StrategyInput,AvellanedaInput};
 use tokio::sync::{mpsc,mpsc::error};
 use std::collections::BTreeMap;
+use tracing::{info};
 // use anyhow::Result;
 
 #[derive(Debug, Clone)]
@@ -75,17 +76,26 @@ pub async fn sequencer_run(
 
     loop {
         tokio::select! {
-            Some(v) = vol_rx.recv() => {
-                state.vol.insert(v.timestamp, v.sigma);
-                // Check interval alignment only once
-                if !vol_interval_checked {
-                    let expected_interval = v.timestamp % interval_ms;
-                    if expected_interval != 0 {
-                        panic!("Volatility update timestamp {} is not aligned with interval_ms {}", v.timestamp, interval_ms);
+            msg = vol_rx.recv() => {
+                match msg {
+                    Some(v) => {
+                        state.vol.insert(v.timestamp, v.sigma);
+                        // Check interval alignment only once
+                        if !vol_interval_checked {
+                            let expected_interval = v.timestamp % interval_ms;
+                            if expected_interval != 0 {
+                                panic!("Volatility update timestamp {} is not aligned with interval_ms {}", v.timestamp, interval_ms);
+                            }
+                            vol_interval_checked = true;
+                        }
                     }
-                    vol_interval_checked = true;
+                    None => {
+                        info!("Volatility feed ended..");
+                        break;
+                    }
                 }
             }
+
             Some(p) = pen_rx.recv() => {
                 state.pen.insert(p.timestamp as i64, (p.fit_A, p.fit_k));
                 // Check interval alignment only once
