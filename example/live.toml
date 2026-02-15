@@ -31,7 +31,7 @@ from_csv = false
 latency_ms = 0
 
 [output]
-csv_path = "example/live_run/"
+csv_path = "example/run/"
 exchange = "bitmex"
 date = ""
 candle_size_min = 1
