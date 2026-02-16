@@ -35,7 +35,7 @@ book_csv = "bitmex_incremental_book_L2_2024-08-01_XBTUSD.csv.gz"
 latency_ms = 0
 
 [output]
-csv_path = "/tmp/engine_output"
+csv_path = "/tmp/mm_output"
 exchange = "bitmex"
 date = "01_08_2024"
 candle_size_min = 1
